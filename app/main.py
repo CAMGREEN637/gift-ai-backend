@@ -1,7 +1,7 @@
 # app/main.py
 
 from typing import Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Depends
 from app.retrieval import retrieve_gifts
 from app.llm import generate_gift_response
 from app.schemas import PreferencesRequest, GiftFeedback
@@ -12,6 +12,8 @@ from app.persistence import (
     get_inferred
 )
 from app.database import init_db
+
+import os
 
 app = FastAPI()
 
@@ -53,7 +55,11 @@ def submit_feedback(feedback: GiftFeedback):
 # Recommendation Endpoint
 # --------------------------------------------------
 
-@app.get("/recommend")
+def require_api_key(x_api_key: str = Header(None)):
+    if x_api_key != os.getenv("BACKEND_API_KEY"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+@app.get("/recommend", dependencies=[Depends(require_api_key)])
 def recommend(
     query: str,
     user_id: Optional[str] = None,
