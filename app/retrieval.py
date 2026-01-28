@@ -2,14 +2,13 @@
 
 from openai import OpenAI
 import os
-from typing import List, Dict, Optional
 from dotenv import load_dotenv
+from typing import List, Dict, Optional
 
 from app.vector_store import collection
 from app.persistence import get_feedback
 
 load_dotenv()
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --------------------------------------------------
@@ -23,7 +22,6 @@ def normalize_list_field(value) -> List[str]:
         return [v.strip().lower() for v in value.split(",") if v.strip()]
     return []
 
-
 def normalize_preferences(preferences: Optional[Dict]) -> Dict:
     if not preferences:
         return {"interests": [], "vibe": []}
@@ -34,80 +32,74 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
     }
 
 # --------------------------------------------------
-# Scoring Helpers
+# Scoring Logic
 # --------------------------------------------------
 
-def distance_to_relevance(distance: float) -> float:
-    """
-    Convert Chroma distance (lower = better)
-    into relevance score (0–1)
-    """
-    return max(0.0, 1.0 - distance)
-
-
-def compute_confidence(
+def compute_score(
     gift: Dict,
-    distance: float,
     preferences: Dict,
     user_id: Optional[str]
 ) -> Dict:
-    """
-    Compute final confidence score using:
-    - semantic relevance (primary)
-    - interest matches
-    - vibe matches
-    - feedback history
-    """
-
-    relevance = distance_to_relevance(distance)
-
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
 
-    interest_score = len(interest_matches) * 0.15
-    vibe_score = len(vibe_matches) * 0.10
+    interest_score = len(interest_matches) * 3
+    vibe_score = len(vibe_matches) * 2
 
-    feedback_score = 0.0
+    feedback_score = 0
     if user_id:
         history = get_feedback(user_id)
         for entry in history:
             if entry["gift_name"] == gift["name"]:
-                feedback_score += 0.2 if entry["liked"] else -0.3
+                feedback_score += 4 if entry["liked"] else -6
 
-    confidence = (
-        0.55 * relevance +
-        interest_score +
-        vibe_score +
-        feedback_score
-    )
-
-    confidence = round(min(max(confidence, 0.35), 0.95), 2)
+    total_score = interest_score + vibe_score + feedback_score
 
     return {
-        "confidence": confidence,
+        "total": total_score,
         "breakdown": {
-            "relevance": round(relevance, 2),
             "interest_match": len(interest_matches),
             "vibe_match": len(vibe_matches),
-            "feedback": feedback_score
-        }
+            "feedback": feedback_score,
+        },
     }
 
+def compute_relative_confidences(scores: List[float]) -> List[float]:
+    """
+    Convert raw scores into relative confidence values (0.55–0.95).
+    """
+    if not scores:
+        return []
 
-def build_ranking_reasons(gift: Dict, breakdown: Dict) -> List[str]:
+    min_score = min(scores)
+    max_score = max(scores)
+
+    # All equal → gentle default spread
+    if min_score == max_score:
+        return [0.6 for _ in scores]
+
+    confidences = []
+    for s in scores:
+        normalized = (s - min_score) / (max_score - min_score)
+        confidence = 0.55 + normalized * 0.4
+        confidences.append(round(confidence, 2))
+
+    return confidences
+
+def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
     reasons = []
 
-    if breakdown["interest_match"] > 0:
-        reasons.append("Matches their interests")
+    if score_data["breakdown"]["interest_match"] > 0:
+        reasons.append("Matches your interests")
 
-    if breakdown["vibe_match"] > 0:
-        reasons.append("Fits the desired vibe")
+    if score_data["breakdown"]["vibe_match"] > 0:
+        reasons.append("Fits your preferred vibe")
 
-    if breakdown["feedback"] > 0:
-        reasons.append("Based on past likes")
+    if score_data["breakdown"]["feedback"] > 0:
+        reasons.append("You liked something similar before")
 
     if not reasons:
-        reasons.append("Strong match for this request")
+        reasons.append("Popular and generally well-reviewed")
 
     return reasons
 
@@ -120,7 +112,7 @@ def retrieve_gifts(
     user_id: Optional[str] = None,
     k: int = 5,
     max_price: Optional[int] = None,
-    preferences: Optional[Dict] = None
+    preferences: Optional[Dict] = None,
 ) -> List[Dict]:
 
     preferences = normalize_preferences(preferences)
@@ -128,18 +120,16 @@ def retrieve_gifts(
     # 1. Embed query
     embedding = client.embeddings.create(
         model="text-embedding-3-small",
-        input=query
+        input=query,
     ).data[0].embedding
 
-    # 2. Vector search (INCLUDE distances)
+    # 2. Vector search
     results = collection.query(
         query_embeddings=[embedding],
         n_results=20,
-        include=["metadatas", "distances"]
     )
 
     gifts = results["metadatas"][0]
-    distances = results["distances"][0]
 
     # 3. Normalize gift metadata
     for g in gifts:
@@ -148,37 +138,30 @@ def retrieve_gifts(
 
     # 4. Price filter
     if max_price is not None:
-        gifts_with_distances = [
-            (g, d) for g, d in zip(gifts, distances)
-            if g.get("price", 0) <= max_price
-        ]
-    else:
-        gifts_with_distances = list(zip(gifts, distances))
+        gifts = [g for g in gifts if g.get("price", 0) <= max_price]
 
-    enriched = []
-
-    # 5. Score + enrich
-    for gift, distance in gifts_with_distances:
-        score_data = compute_confidence(
-            gift=gift,
-            distance=distance,
-            preferences=preferences,
-            user_id=user_id
-        )
-
-        enriched.append({
+    # 5. Score gifts
+    scored = []
+    for gift in gifts:
+        score_data = compute_score(gift, preferences, user_id)
+        scored.append({
             **gift,
-            "confidence": score_data["confidence"],
-            "ranking_reasons": build_ranking_reasons(
-                gift,
-                score_data["breakdown"]
-            )
+            "score": score_data["total"],
+            "ranking_reasons": build_ranking_reasons(gift, score_data),
         })
 
-    # 6. Sort by confidence + return top-k
-    enriched.sort(key=lambda g: g["confidence"], reverse=True)
-    return enriched[:k]
+    # 6. Sort by score
+    scored.sort(key=lambda g: g["score"], reverse=True)
 
+    # 7. Compute relative confidence
+    scores = [g["score"] for g in scored]
+    confidences = compute_relative_confidences(scores)
+
+    # 8. Attach confidence
+    for gift, conf in zip(scored, confidences):
+        gift["confidence"] = conf
+
+    return scored[:k]
 
 
 
