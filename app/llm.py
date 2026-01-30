@@ -2,7 +2,7 @@ from openai import OpenAI
 import os
 from dotenv import load_dotenv
 from typing import List, Dict, Optional
-
+import json
 
 load_dotenv()
 
@@ -15,7 +15,7 @@ def generate_gift_response(
 ) -> Dict:
     """
     Generates a natural language explanation of gift recommendations.
-    The LLM must only explain existing ranking signals.
+    Preserves ranking detail while ensuring frontend-safe output.
     """
 
     # ---------- Build preference context ----------
@@ -40,8 +40,8 @@ explicitly explain how each gift aligns with them.
 Name: {gift['name']}
 Price: ${gift['price']}
 Confidence: {gift['confidence']}
-Ranking reasons: {', '.join(gift['ranking_reasons']) if gift['ranking_reasons'] else 'General relevance'}
-Description: {gift['description']}
+Ranking reasons: {', '.join(gift.get('ranking_reasons', [])) or 'General relevance'}
+Description: {gift.get('description', 'No description provided')}
 ---
 """
 
@@ -68,7 +68,7 @@ Rules:
     user_prompt = f"""
 User query: "{query}"
 
-Based on the gift options below, return a JSON response in this format:
+Return STRICT JSON in this format:
 
 {{
   "intro": "one short sentence setting context",
@@ -97,24 +97,48 @@ Gift options:
         temperature=0.4
     )
 
-    # ---------- Parse and return ----------
-
     content = response.choices[0].message.content
 
+    # ---------- Parse + normalize output ----------
+
     try:
-        return eval(content)
+        parsed = json.loads(content)
     except Exception:
-        # Fallback if JSON parsing fails
-        return {
+        parsed = {
             "intro": "Here are a few thoughtful gift ideas you might like:",
-            "gifts": [
-                {
-                    "name": g["name"],
-                    "price": g["price"],
-                    "confidence": g["confidence"],
-                    "reason": "This gift is relevant based on your query and preferences."
-                }
-                for g in gifts
-            ]
+            "gifts": []
         }
+
+    # ---------- HARD NORMALIZATION (CRITICAL FIX) ----------
+
+    normalized_gifts = []
+
+    for gift in parsed.get("gifts", []):
+        # Find original gift to recover ranking reasons
+        source = next(
+            (g for g in gifts if g["name"] == gift["name"]),
+            None
+        )
+
+        ranking_reasons = (
+            source.get("ranking_reasons")
+            if source and isinstance(source.get("ranking_reasons"), list)
+            else ["Good overall match for your request"]
+        )
+
+        normalized_gifts.append({
+            "name": gift["name"],
+            "price": gift.get("price"),
+            "confidence": gift.get("confidence", 0.5),
+            "reason": gift.get("reason"),
+            "ranking_reasons": ranking_reasons,
+        })
+
+    return {
+        "intro": parsed.get(
+            "intro",
+            "Here are some thoughtful gift ideas based on your request."
+        ),
+        "gifts": normalized_gifts,
+    }
 
