@@ -64,6 +64,13 @@ def compute_score(
         },
     }
 
+def semantic_score_from_distance(distance: float) -> float:
+    """
+    Convert vector distance into a positive score.
+    Lower distance = higher relevance.
+    """
+    return max(0.0, 1.5 - distance) * 10
+
 def compute_relative_confidences(scores: List[float]) -> List[float]:
     """
     Convert raw scores into relative confidence values (0.55–0.95).
@@ -74,7 +81,7 @@ def compute_relative_confidences(scores: List[float]) -> List[float]:
     min_score = min(scores)
     max_score = max(scores)
 
-    # All equal → gentle default spread
+    # All equal → default confidence
     if min_score == max_score:
         return [0.6 for _ in scores]
 
@@ -99,7 +106,7 @@ def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
         reasons.append("You liked something similar before")
 
     if not reasons:
-        reasons.append("Popular and generally well-reviewed")
+        reasons.append("Relevant to your search")
 
     return reasons
 
@@ -123,13 +130,15 @@ def retrieve_gifts(
         input=query,
     ).data[0].embedding
 
-    # 2. Vector search
+    # 2. Vector search (include distances!)
     results = collection.query(
         query_embeddings=[embedding],
         n_results=20,
+        include=["metadatas", "distances"],
     )
 
     gifts = results["metadatas"][0]
+    distances = results["distances"][0]
 
     # 3. Normalize gift metadata
     for g in gifts:
@@ -140,13 +149,17 @@ def retrieve_gifts(
     if max_price is not None:
         gifts = [g for g in gifts if g.get("price", 0) <= max_price]
 
-    # 5. Score gifts
+    # 5. Score gifts (semantic + heuristic)
     scored = []
-    for gift in gifts:
+    for gift, distance in zip(gifts, distances):
         score_data = compute_score(gift, preferences, user_id)
+        semantic_score = semantic_score_from_distance(distance)
+
+        total_score = score_data["total"] + semantic_score
+
         scored.append({
             **gift,
-            "score": score_data["total"],
+            "score": total_score,
             "ranking_reasons": build_ranking_reasons(gift, score_data),
         })
 
