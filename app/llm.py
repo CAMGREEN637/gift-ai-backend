@@ -1,3 +1,4 @@
+# app/llm.py
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
@@ -15,7 +16,10 @@ def generate_gift_response(
 ) -> Dict:
     """
     Generates a natural language explanation of gift recommendations.
-    Preserves ranking detail while ensuring frontend-safe output.
+
+    IMPORTANT:
+    - Retrieval owns product data (image_url, product_url, description, etc.)
+    - LLM ONLY provides explanations
     """
 
     # ---------- Build preference context ----------
@@ -32,15 +36,15 @@ explicitly explain how each gift aligns with them.
     else:
         pref_text = "User did not provide explicit preferences."
 
-    # ---------- Build gift context ----------
+    # ---------- Build gift context (LLM sees only explainable fields) ----------
 
     gift_context = ""
     for gift in gifts:
         gift_context += f"""
-Name: {gift['name']}
-Price: ${gift['price']}
-Confidence: {gift['confidence']}
-Ranking reasons: {', '.join(gift.get('ranking_reasons', [])) or 'General relevance'}
+Name: {gift.get('name')}
+Price: ${gift.get('price')}
+Confidence: {gift.get('confidence')}
+Ranking reasons: {', '.join(gift.get('ranking_reasons', [])) or 'Relevant to the search'}
 Description: {gift.get('description', 'No description provided')}
 ---
 """
@@ -57,10 +61,10 @@ and persuasively — without inventing facts.
 
 Rules:
 - Treat higher confidence gifts as stronger recommendations
-- Use ranking reasons verbatim when explaining why a gift was chosen
-- Do NOT invent new reasons or preferences
-- If a gift has lower confidence, frame it as an alternative
-- Keep explanations concise but warm
+- Use ranking reasons verbatim
+- Do NOT invent product details
+- Do NOT invent preferences
+- Keep explanations concise and warm
 """
 
     # ---------- User prompt ----------
@@ -75,8 +79,6 @@ Return STRICT JSON in this format:
   "gifts": [
     {{
       "name": "gift name",
-      "price": number,
-      "confidence": number,
       "reason": "1–2 sentence explanation referencing ranking reasons"
     }}
   ]
@@ -99,7 +101,7 @@ Gift options:
 
     content = response.choices[0].message.content
 
-    # ---------- Parse + normalize output ----------
+    # ---------- Parse response safely ----------
 
     try:
         parsed = json.loads(content)
@@ -109,36 +111,31 @@ Gift options:
             "gifts": []
         }
 
-    # ---------- HARD NORMALIZATION (CRITICAL FIX) ----------
+    # ---------- MERGE explanations INTO original gifts ----------
 
-    normalized_gifts = []
+    explanations_by_name = {
+        g["name"]: g.get("reason")
+        for g in parsed.get("gifts", [])
+        if isinstance(g, dict) and "name" in g
+    }
 
-    for gift in parsed.get("gifts", []):
-        # Find original gift to recover ranking reasons
-        source = next(
-            (g for g in gifts if g["name"] == gift["name"]),
-            None
-        )
+    enriched_gifts = []
 
-        ranking_reasons = (
-            source.get("ranking_reasons")
-            if source and isinstance(source.get("ranking_reasons"), list)
-            else ["Good overall match for your request"]
-        )
-
-        normalized_gifts.append({
-            "name": gift["name"],
-            "price": gift.get("price"),
-            "confidence": gift.get("confidence", 0.5),
-            "reason": gift.get("reason"),
-            "ranking_reasons": ranking_reasons,
-        })
+    for gift in gifts:
+        enriched = {
+            **gift,  # ← THIS PRESERVES image_url, product_url, description
+            "reason": explanations_by_name.get(
+                gift.get("name"),
+                "This gift is a strong match based on your search and preferences."
+            )
+        }
+        enriched_gifts.append(enriched)
 
     return {
         "intro": parsed.get(
             "intro",
             "Here are some thoughtful gift ideas based on your request."
         ),
-        "gifts": normalized_gifts,
+        "gifts": enriched_gifts,
     }
 
