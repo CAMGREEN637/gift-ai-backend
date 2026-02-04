@@ -16,70 +16,56 @@ def generate_gift_response(
 ) -> Dict:
     """
     Generates a natural language explanation of gift recommendations.
-
-    IMPORTANT:
-    - Retrieval owns product data (image_url, product_url, description, etc.)
-    - LLM ONLY provides explanations
+    Preserves ranking detail AND all gift fields for frontend rendering.
     """
 
-    # ---------- Build preference context ----------
+    # ---------- Preference context ----------
 
     if preferences:
         pref_text = f"""
 User preferences (IMPORTANT):
 - Interests: {preferences.get("interests", [])}
 - Vibe: {preferences.get("vibe", [])}
-
-You must prioritize gifts that match these preferences and
-explicitly explain how each gift aligns with them.
 """
     else:
         pref_text = "User did not provide explicit preferences."
 
-    # ---------- Build gift context (LLM sees only explainable fields) ----------
+    # ---------- Gift context for LLM ----------
 
     gift_context = ""
     for gift in gifts:
         gift_context += f"""
-Name: {gift.get('name')}
-Price: ${gift.get('price')}
-Confidence: {gift.get('confidence')}
-Ranking reasons: {', '.join(gift.get('ranking_reasons', [])) or 'Relevant to the search'}
-Description: {gift.get('description', 'No description provided')}
+Name: {gift['name']}
+Price: ${gift['price']}
+Confidence: {gift['confidence']}
+Ranking reasons: {', '.join(gift.get('ranking_reasons', [])) or 'General relevance'}
+Description: {gift.get('description', '')}
 ---
 """
-
-    # ---------- System prompt ----------
 
     system_prompt = f"""
 You are a thoughtful gift recommendation assistant.
 
-Your job is to explain gift recommendations clearly, honestly,
-and persuasively — without inventing facts.
-
 {pref_text}
 
 Rules:
-- Treat higher confidence gifts as stronger recommendations
-- Use ranking reasons verbatim
-- Do NOT invent product details
+- Do NOT invent facts
 - Do NOT invent preferences
-- Keep explanations concise and warm
+- Use ranking reasons verbatim
+- Treat higher confidence gifts as stronger recommendations
 """
-
-    # ---------- User prompt ----------
 
     user_prompt = f"""
 User query: "{query}"
 
-Return STRICT JSON in this format:
+Return STRICT JSON:
 
 {{
-  "intro": "one short sentence setting context",
+  "intro": "one short sentence",
   "gifts": [
     {{
       "name": "gift name",
-      "reason": "1–2 sentence explanation referencing ranking reasons"
+      "reason": "1–2 sentence explanation"
     }}
   ]
 }}
@@ -87,8 +73,6 @@ Return STRICT JSON in this format:
 Gift options:
 {gift_context}
 """
-
-    # ---------- LLM call ----------
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -101,41 +85,32 @@ Gift options:
 
     content = response.choices[0].message.content
 
-    # ---------- Parse response safely ----------
-
     try:
         parsed = json.loads(content)
     except Exception:
-        parsed = {
-            "intro": "Here are a few thoughtful gift ideas you might like:",
-            "gifts": []
-        }
+        parsed = {"intro": "", "gifts": []}
 
-    # ---------- MERGE explanations INTO original gifts ----------
+    # ---------- CRITICAL FIX ----------
+    # Reattach ALL original gift fields
 
-    explanations_by_name = {
-        g["name"]: g.get("reason")
-        for g in parsed.get("gifts", [])
-        if isinstance(g, dict) and "name" in g
-    }
+    enriched = []
 
-    enriched_gifts = []
+    for original in gifts:
+        llm_match = next(
+            (g for g in parsed.get("gifts", []) if g["name"] == original["name"]),
+            None
+        )
 
-    for gift in gifts:
-        enriched = {
-            **gift,  # ← THIS PRESERVES image_url, product_url, description
-            "reason": explanations_by_name.get(
-                gift.get("name"),
-                "This gift is a strong match based on your search and preferences."
-            )
-        }
-        enriched_gifts.append(enriched)
+        enriched.append({
+            **original,  # ← THIS is what was missing
+            "reason": llm_match.get("reason") if llm_match else
+                      "This gift matches your request based on relevance.",
+        })
 
     return {
         "intro": parsed.get(
             "intro",
-            "Here are some thoughtful gift ideas based on your request."
+            "Here are some thoughtful gift ideas for you:"
         ),
-        "gifts": enriched_gifts,
+        "gifts": enriched
     }
-
