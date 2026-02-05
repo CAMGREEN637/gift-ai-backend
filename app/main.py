@@ -16,6 +16,8 @@ from app.persistence import (
     get_inferred,
 )
 from app.database import init_db
+from fastapi.responses import StreamingResponse
+import httpx
 
 # --------------------------------------------------
 # App Setup
@@ -156,3 +158,24 @@ def load_vectors():
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/proxy-image")
+async def proxy_image(url: str):
+    """
+    Proxy endpoint to fetch images and bypass CORS restrictions.
+    Usage: /proxy-image?url=https://m.media-amazon.com/...
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+
+            if response.status_code == 200:
+                return StreamingResponse(
+                    iter([response.content]),
+                    media_type=response.headers.get("content-type", "image/jpeg")
+                )
+            else:
+                return {"error": "Failed to fetch image"}
+    except Exception as e:
+        return {"error": str(e)}
