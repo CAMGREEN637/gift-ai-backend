@@ -15,10 +15,13 @@ def generate_gift_response(
    query: str,
    gifts: List[Dict],
    preferences: Optional[Dict] = None
-) -> Dict:
+) -> tuple[Dict, int]:
    """
    Generates a natural language explanation of gift recommendations.
    Preserves ranking detail AND all gift fields for frontend rendering.
+
+   Returns:
+       Tuple of (response_data, tokens_used)
    """
 
 
@@ -97,6 +100,8 @@ Gift options:
        temperature=0.4
    )
 
+   # Extract token usage from response
+   tokens_used = response.usage.total_tokens if response.usage else 0
 
    content = response.choices[0].message.content
 
@@ -134,10 +139,12 @@ Gift options:
        })
 
 
-   return {
+   response_data = {
        "intro": parsed.get(
            "intro",
            "Here are some thoughtful gift ideas for you:"
        ),
        "gifts": enriched
    }
+
+   return response_data, tokens_used

@@ -18,7 +18,11 @@ from app.persistence import (
     save_feedback,
     get_inferred,
 )
-from app.database import init_db
+from app.database import init_db, get_db
+from app.dependencies import check_rate_limit_dependency
+from app.rate_limiter import record_token_usage
+from sqlalchemy.orm import Session
+
 
 # --------------------------------------------------
 # Configure logging
@@ -158,7 +162,11 @@ def recommend(
     query: str,
     user_id: Optional[str] = None,
     max_price: Optional[int] = None,
+    db: Session = Depends(get_db),
+    ip_address: str = Depends(check_rate_limit_dependency)
 ):
+    logger.info(f"Recommendation request from IP: {ip_address}, query: {query}")
+
     # ---------------------------
     # Load explicit preferences
     # ---------------------------
@@ -197,11 +205,29 @@ def recommend(
     # ---------------------------
     # Generate response
     # ---------------------------
-    return generate_gift_response(
+    llm_response, tokens_used = generate_gift_response(
         query=query,
         gifts=gifts,
         preferences=merged_preferences,
     )
+
+    # ---------------------------
+    # Record token usage
+    # ---------------------------
+    try:
+        record_token_usage(
+            session=db,
+            ip_address=ip_address,
+            tokens=tokens_used,
+            model="gpt-4o-mini",
+            endpoint="/recommend"
+        )
+        logger.info(f"Recorded {tokens_used} tokens for IP: {ip_address}")
+    except Exception as e:
+        logger.error(f"Failed to record token usage: {str(e)}")
+        # Don't fail the request if token recording fails
+
+    return llm_response
 
 # --------------------------------------------------
 # Admin Endpoint (Protected)
