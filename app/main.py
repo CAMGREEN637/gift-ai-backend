@@ -21,7 +21,7 @@ from app.persistence import (
 from app.database import init_db, get_db
 from app.dependencies import check_rate_limit_dependency
 from app.rate_limiter import record_token_usage
-from sqlalchemy.orm import Session
+from supabase import Client
 
 
 # --------------------------------------------------
@@ -162,7 +162,7 @@ def recommend(
     query: str,
     user_id: Optional[str] = None,
     max_price: Optional[int] = None,
-    db: Session = Depends(get_db),
+    db: Client = Depends(get_db),
     ip_address: str = Depends(check_rate_limit_dependency)
 ):
     logger.info(f"Recommendation request from IP: {ip_address}, query: {query}")
@@ -216,7 +216,7 @@ def recommend(
     # ---------------------------
     try:
         record_token_usage(
-            session=db,
+            client=db,
             ip_address=ip_address,
             tokens=tokens_used,
             model="gpt-4o-mini",

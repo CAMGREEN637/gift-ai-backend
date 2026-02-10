@@ -1,6 +1,8 @@
 fastapi
 uvicorn
-sqlalchemy
 pydantic
 chromadb
 openai
+supabase
+python-dotenv
+httpx
