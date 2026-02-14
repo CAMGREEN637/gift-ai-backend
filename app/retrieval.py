@@ -4,12 +4,14 @@ from openai import OpenAI
 import os
 from dotenv import load_dotenv
 from typing import List, Dict, Optional
+import logging
 
-from app.vector_store import collection
 from app.persistence import get_feedback
+from app.database import get_db
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------
 # Normalization Helpers
@@ -36,9 +38,9 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
 # --------------------------------------------------
 
 def compute_score(
-    gift: Dict,
-    preferences: Dict,
-    user_id: Optional[str]
+        gift: Dict,
+        preferences: Dict,
+        user_id: Optional[str]
 ) -> Dict:
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
@@ -64,12 +66,38 @@ def compute_score(
         },
     }
 
-def semantic_score_from_distance(distance: float) -> float:
+def semantic_score_from_query_match(gift: Dict, query: str) -> float:
     """
-    Convert vector distance into a positive score.
-    Lower distance = higher relevance.
+    Score based on keyword matching with query.
+    This replaces vector distance scoring until embeddings are implemented.
     """
-    return max(0.0, 1.5 - distance) * 10
+    score = 0.0
+    query_lower = query.lower()
+
+    # Check name match (highest weight)
+    if query_lower in gift.get("name", "").lower():
+        score += 5.0
+
+    # Check description match
+    if query_lower in gift.get("description", "").lower():
+        score += 3.0
+
+    # Check categories
+    categories = gift.get("categories", [])
+    if any(query_lower in cat.lower() for cat in categories):
+        score += 4.0
+
+    # Check interests
+    interests = gift.get("interests", [])
+    if any(query_lower in interest.lower() for interest in interests):
+        score += 3.0
+
+    # Check occasions
+    occasions = gift.get("occasions", [])
+    if any(query_lower in occ.lower() for occ in occasions):
+        score += 2.0
+
+    return score
 
 def compute_relative_confidences(scores: List[float]) -> List[float]:
     """
@@ -115,46 +143,66 @@ def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
 # --------------------------------------------------
 
 def retrieve_gifts(
-    query: str,
-    user_id: Optional[str] = None,
-    k: int = 5,
-    max_price: Optional[int] = None,
-    preferences: Optional[Dict] = None,
+        query: str,
+        user_id: Optional[str] = None,
+        k: int = 5,
+        max_price: Optional[int] = None,
+        preferences: Optional[Dict] = None,
 ) -> List[Dict]:
+    """
+    Retrieve gifts from Supabase database and score them.
+    """
 
     preferences = normalize_preferences(preferences)
 
-    # 1. Embed query
-    embedding = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=query,
-    ).data[0].embedding
+    try:
+        # 1. Get Supabase client
+        supabase = get_db()
 
-    # 2. Vector search (include distances!)
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=20,
-        include=["metadatas", "distances"],
-    )
+        # 2. Query gifts from Supabase
+        db_query = supabase.table('gifts').select('*')
 
-    gifts = results["metadatas"][0]
-    distances = results["distances"][0]
+        # Apply price filter at database level if specified
+        if max_price is not None:
+            db_query = db_query.lte('price', max_price)
+
+        # Only get in-stock items
+        db_query = db_query.eq('in_stock', True)
+
+        # Get more results for better filtering (50 max)
+        db_query = db_query.order('created_at', desc=True).limit(50)
+
+        # Execute query
+        response = db_query.execute()
+
+        if not response.data:
+            logger.warning("No gifts found in Supabase database")
+            return []
+
+        gifts = response.data
+        logger.info(f"✓ Retrieved {len(gifts)} gifts from Supabase")
+
+    except Exception as e:
+        logger.error(f"Error retrieving gifts from Supabase: {str(e)}")
+        return []
 
     # 3. Normalize gift metadata
     for g in gifts:
-        g["interests"] = normalize_list_field(g.get("interests"))
-        g["vibe"] = normalize_list_field(g.get("vibe"))
+        g["interests"] = normalize_list_field(g.get("interests", []))
+        g["vibe"] = normalize_list_field(g.get("vibe", []))
+        g["categories"] = normalize_list_field(g.get("categories", []))
+        g["occasions"] = normalize_list_field(g.get("occasions", []))
 
-    # 4. Price filter
-    if max_price is not None:
-        gifts = [g for g in gifts if g.get("price", 0) <= max_price]
-
-    # 5. Score gifts (semantic + heuristic)
+    # 4. Score gifts (semantic + heuristic)
     scored = []
-    for gift, distance in zip(gifts, distances):
+    for gift in gifts:
+        # Compute heuristic score (interests, vibe, feedback)
         score_data = compute_score(gift, preferences, user_id)
-        semantic_score = semantic_score_from_distance(distance)
 
+        # Compute semantic score based on query matching
+        semantic_score = semantic_score_from_query_match(gift, query)
+
+        # Combine scores
         total_score = score_data["total"] + semantic_score
 
         scored.append({
@@ -163,21 +211,111 @@ def retrieve_gifts(
             "ranking_reasons": build_ranking_reasons(gift, score_data),
         })
 
-    # 6. Sort by score
+    # 5. Sort by score (highest first)
     scored.sort(key=lambda g: g["score"], reverse=True)
 
-    # 7. Compute relative confidence
+    # 6. Compute relative confidence
     scores = [g["score"] for g in scored]
     confidences = compute_relative_confidences(scores)
 
-    # 8. Attach confidence
+    # 7. Attach confidence to each gift
     for gift, conf in zip(scored, confidences):
         gift["confidence"] = conf
 
-    return scored[:k]
+    # 8. Return top k results
+    top_gifts = scored[:k]
+
+    logger.info(f"Returning {len(top_gifts)} top-scored gifts")
+    return top_gifts
 
 
+# --------------------------------------------------
+# Helper Functions for Future Enhancements
+# --------------------------------------------------
+
+def retrieve_gifts_by_category(
+        category: str,
+        k: int = 10,
+        max_price: Optional[int] = None
+) -> List[Dict]:
+    """
+    Retrieve gifts filtered by category.
+    """
+    try:
+        supabase = get_db()
+
+        db_query = supabase.table('gifts').select('*')
+
+        # Filter by category (PostgreSQL array contains)
+        db_query = db_query.contains('categories', [category.lower()])
+
+        if max_price:
+            db_query = db_query.lte('price', max_price)
+
+        db_query = db_query.eq('in_stock', True)
+        db_query = db_query.order('rating', desc=True).limit(k)
+
+        response = db_query.execute()
+        return response.data if response.data else []
+
+    except Exception as e:
+        logger.error(f"Error retrieving gifts by category: {str(e)}")
+        return []
 
 
+def retrieve_gifts_by_occasion(
+        occasion: str,
+        k: int = 10,
+        max_price: Optional[int] = None
+) -> List[Dict]:
+    """
+    Retrieve gifts filtered by occasion.
+    """
+    try:
+        supabase = get_db()
+
+        db_query = supabase.table('gifts').select('*')
+
+        # Filter by occasion (PostgreSQL array contains)
+        db_query = db_query.contains('occasions', [occasion.lower()])
+
+        if max_price:
+            db_query = db_query.lte('price', max_price)
+
+        db_query = db_query.eq('in_stock', True)
+        db_query = db_query.order('rating', desc=True).limit(k)
+
+        response = db_query.execute()
+        return response.data if response.data else []
+
+    except Exception as e:
+        logger.error(f"Error retrieving gifts by occasion: {str(e)}")
+        return []
+
+
+# --------------------------------------------------
+# TODO: Future Enhancement - Vector Embeddings
+# --------------------------------------------------
+
+def retrieve_gifts_with_embeddings(
+        query: str,
+        user_id: Optional[str] = None,
+        k: int = 5,
+        max_price: Optional[int] = None,
+        preferences: Optional[Dict] = None,
+) -> List[Dict]:
+    """
+    Future implementation using OpenAI embeddings + Supabase pgvector.
+
+    Steps:
+    1. Generate embedding for query using OpenAI
+    2. Store embeddings in Supabase with pgvector extension
+    3. Use similarity search instead of keyword matching
+    4. Combine with heuristic scoring
+
+    For now, use retrieve_gifts() which does keyword matching.
+    """
+    # TODO: Implement when ready to add vector search
+    pass
 
 

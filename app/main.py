@@ -2,10 +2,12 @@
 
 import os
 from typing import Optional
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
 import logging
 
@@ -26,7 +28,6 @@ from supabase import Client
 # Import admin router
 from app.admin_api import router as admin_router
 
-
 # --------------------------------------------------
 # Configure logging
 # --------------------------------------------------
@@ -38,8 +39,22 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 app = FastAPI(title="Gift AI Backend")
 
+# --------------------------------------------------
+# Mount static files FIRST (before routes)
+# --------------------------------------------------
+try:
+    # Static files are in app/static/
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    logger.info(f"✓ Static files mounted from: {static_dir}")
+except Exception as e:
+    logger.warning(f"Could not mount static files: {str(e)}")
+
+# --------------------------------------------------
 # Include admin router
+# --------------------------------------------------
 app.include_router(admin_router)
+
 
 # --------------------------------------------------
 # Startup: initialize database
@@ -47,6 +62,7 @@ app.include_router(admin_router)
 @app.on_event("startup")
 def startup():
     init_db()
+
 
 # --------------------------------------------------
 # API Key Protection (ADMIN ONLY)
@@ -56,6 +72,7 @@ def require_api_key(x_api_key: str = Header(None)):
 
     if not expected_key or x_api_key != expected_key:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # --------------------------------------------------
 # CORS (Frontend Access)
@@ -71,6 +88,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # --------------------------------------------------
 # Image Proxy Endpoints
@@ -131,6 +149,7 @@ async def test_proxy():
     logger.info(f"Testing proxy with: {test_url}")
     return await proxy_image(test_url)
 
+
 # --------------------------------------------------
 # Preferences Endpoint (Explicit User Input)
 # --------------------------------------------------
@@ -142,6 +161,7 @@ def save_user_preferences(preferences: PreferencesRequest):
         vibe=preferences.vibe,
     )
     return {"status": "saved"}
+
 
 # --------------------------------------------------
 # Feedback Endpoint
@@ -160,16 +180,17 @@ def submit_feedback(feedback: GiftFeedback):
 
     return {"status": "feedback recorded"}
 
+
 # --------------------------------------------------
 # Recommendation Endpoint (PUBLIC)
 # --------------------------------------------------
 @app.get("/recommend")
 def recommend(
-    query: str,
-    user_id: Optional[str] = None,
-    max_price: Optional[int] = None,
-    db: Client = Depends(get_db),
-    ip_address: str = Depends(check_rate_limit_dependency)
+        query: str,
+        user_id: Optional[str] = None,
+        max_price: Optional[int] = None,
+        db: Client = Depends(get_db),
+        ip_address: str = Depends(check_rate_limit_dependency)
 ):
     logger.info(f"Recommendation request from IP: {ip_address}, query: {query}")
 
@@ -189,12 +210,12 @@ def recommend(
     # ---------------------------
     merged_preferences = {
         "interests": (
-            explicit["interests"]
-            + [key for key, weight in inferred["interests"].items() for _ in range(weight)]
+                explicit["interests"]
+                + [key for key, weight in inferred["interests"].items() for _ in range(weight)]
         ),
         "vibe": (
-            explicit["vibe"]
-            + [key for key, weight in inferred["vibe"].items() for _ in range(weight)]
+                explicit["vibe"]
+                + [key for key, weight in inferred["vibe"].items() for _ in range(weight)]
         ),
     }
 
@@ -235,6 +256,7 @@ def recommend(
 
     return llm_response
 
+
 # --------------------------------------------------
 # Admin Endpoint (Protected)
 # --------------------------------------------------
@@ -242,12 +264,6 @@ def recommend(
 def load_vectors():
     return {"status": "Vectors loaded"}
 
-# --------------------------------------------------
-# Health Check
-# --------------------------------------------------
-@app.get("/")
-def health():
-    return {"status": "ok"}
 
 # --------------------------------------------------
 # Admin Dashboard
@@ -256,14 +272,39 @@ def health():
 async def admin_dashboard():
     """Serve the admin product management dashboard"""
     try:
-        with open("app/static/admin.html", "r") as f:
-            return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Admin dashboard not found")
+        # Get path to admin.html in app/static/
+        html_path = Path(__file__).parent / "static" / "admin.html"
 
-# Static files for admin
-from fastapi.staticfiles import StaticFiles
-try:
-    app.mount("/static", StaticFiles(directory="app/static"), name="static")
-except Exception as e:
-    logger.warning(f"Could not mount static files: {str(e)}")
+        logger.info(f"Loading admin dashboard from: {html_path}")
+
+        # Use UTF-8 encoding to handle emojis and special characters
+        with open(html_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            logger.info("✓ Admin dashboard loaded successfully")
+            return HTMLResponse(content=content)
+
+    except FileNotFoundError:
+        logger.error(f"Admin dashboard not found at: {html_path}")
+        return HTMLResponse(
+            content=f"""
+            <h1>Admin dashboard not found</h1>
+            <p>Expected location: {html_path}</p>
+            <p>Make sure app/static/admin.html exists</p>
+            """,
+            status_code=404
+        )
+    except Exception as e:
+        logger.error(f"Error loading admin dashboard: {str(e)}")
+        return HTMLResponse(
+            content=f"<h1>Error loading admin page</h1><p>{str(e)}</p>",
+            status_code=500
+        )
+
+
+# --------------------------------------------------
+# Health Check
+# --------------------------------------------------
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
