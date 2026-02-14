@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 import httpx
 import logging
 
@@ -23,6 +23,9 @@ from app.dependencies import check_rate_limit_dependency
 from app.rate_limiter import record_token_usage
 from supabase import Client
 
+# Import admin router
+from app.admin_api import router as admin_router
+
 
 # --------------------------------------------------
 # Configure logging
@@ -34,6 +37,9 @@ logger = logging.getLogger(__name__)
 # App Setup (ONLY ONE INSTANCE!)
 # --------------------------------------------------
 app = FastAPI(title="Gift AI Backend")
+
+# Include admin router
+app.include_router(admin_router)
 
 # --------------------------------------------------
 # Startup: initialize database
@@ -242,3 +248,22 @@ def load_vectors():
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+# --------------------------------------------------
+# Admin Dashboard
+# --------------------------------------------------
+@app.get("/admin/products", response_class=HTMLResponse)
+async def admin_dashboard():
+    """Serve the admin product management dashboard"""
+    try:
+        with open("app/static/admin.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Admin dashboard not found")
+
+# Static files for admin
+from fastapi.staticfiles import StaticFiles
+try:
+    app.mount("/static", StaticFiles(directory="app/static"), name="static")
+except Exception as e:
+    logger.warning(f"Could not mount static files: {str(e)}")
