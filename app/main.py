@@ -335,3 +335,51 @@ async def debug_gifts_simple():
             "status": "error",
             "error": str(e)
         }
+
+
+@app.get("/debug/quick-test")
+async def quick_test():
+    """Quick test to see where retrieval fails"""
+    from app.database import get_db
+
+    results = {}
+
+    # Step 1: Can we connect to database?
+    try:
+        db = get_db()
+        results["database_connection"] = "✅ OK"
+    except Exception as e:
+        results["database_connection"] = f"❌ FAILED: {str(e)}"
+        return results
+
+    # Step 2: Can we get gifts from Supabase?
+    try:
+        response = db.table('gifts').select('*').limit(5).execute()
+        results["database_query"] = f"✅ OK - Found {len(response.data)} gifts"
+        results["sample_gift_names"] = [g.get("name") for g in response.data]
+    except Exception as e:
+        results["database_query"] = f"❌ FAILED: {str(e)}"
+        return results
+
+    # Step 3: Can retrieval.py be imported?
+    try:
+        from app.retrieval import retrieve_gifts
+        results["import_retrieval"] = "✅ OK"
+    except Exception as e:
+        results["import_retrieval"] = f"❌ FAILED: {str(e)}"
+        return results
+
+    # Step 4: Can retrieve_gifts run?
+    try:
+        gifts = retrieve_gifts(query="test", k=10)
+        results["retrieve_gifts"] = f"✅ OK - Returned {len(gifts)} gifts"
+        if gifts:
+            results["first_gift"] = gifts[0].get("name", "NO NAME")
+        else:
+            results["first_gift"] = "No gifts returned!"
+    except Exception as e:
+        results["retrieve_gifts"] = f"❌ FAILED: {str(e)}"
+        import traceback
+        results["traceback"] = traceback.format_exc()
+
+    return results
