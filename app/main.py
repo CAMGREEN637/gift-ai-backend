@@ -308,3 +308,30 @@ async def admin_dashboard():
 def health():
     return {"status": "ok"}
 
+
+@app.get("/debug/gifts-simple")
+async def debug_gifts_simple():
+    """Simpler debug endpoint"""
+    try:
+        import os
+        from supabase import create_client
+
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+
+        if not url or not key:
+            return {"error": "Missing Supabase credentials"}
+
+        supabase = create_client(url, key)
+        response = supabase.table('gifts').select('*').limit(5).execute()
+
+        return {
+            "status": "ok",
+            "count": len(response.data) if response.data else 0,
+            "gifts": response.data
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
