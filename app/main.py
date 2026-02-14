@@ -340,13 +340,21 @@ async def debug_gifts_simple():
 @app.get("/debug/quick-test")
 async def quick_test():
     """Quick test to see where retrieval fails"""
-    from app.database import get_db
-
     results = {}
 
     # Step 1: Can we connect to database?
     try:
-        db = get_db()
+        from supabase import create_client
+        import os
+
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")  # ← Fixed
+
+        if not url or not key:
+            results["database_connection"] = f"❌ Missing credentials"
+            return results
+
+        db = create_client(url, key)  # ← Fixed
         results["database_connection"] = "✅ OK"
     except Exception as e:
         results["database_connection"] = f"❌ FAILED: {str(e)}"
