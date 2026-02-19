@@ -53,7 +53,7 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
 
 
 # --------------------------------------------------
-# Scoring Logic
+# Scoring Logic - FIXED
 # --------------------------------------------------
 
 def compute_score(
@@ -61,11 +61,16 @@ def compute_score(
         preferences: Dict,
         user_id: Optional[str]
 ) -> Dict:
+    """
+    Compute preference-based scoring (interests/vibe from user profile).
+    Reduced weight so query relevance takes priority.
+    """
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
 
-    interest_score = len(interest_matches) * 3
-    vibe_score = len(vibe_matches) * 2
+    # Lower weight for preferences so they don't override query match
+    interest_score = len(interest_matches) * 2.0  # Reduced from 3
+    vibe_score = len(vibe_matches) * 1.0  # Reduced from 2
 
     feedback_score = 0
     if user_id:
@@ -89,41 +94,70 @@ def compute_score(
 def semantic_score_from_query_match(gift: Dict, query: str) -> float:
     """
     Score based on keyword matching with query.
-    More lenient scoring to ensure gifts appear.
+    Start at 0 to ensure only relevant gifts score high.
     """
-    score = 5.0  # Start with base score
+    score = 0.0  # Start at 0 instead of 5.0
     query_lower = query.lower()
     query_words = query_lower.split()
 
-    # Check name match (highest weight)
+    # Extract searchable text from gift
     name = gift.get("name", "").lower()
-    for word in query_words:
-        if len(word) >= 3 and word in name:
-            score += 10.0
-
-    # Check description match
     description = gift.get("description", "").lower()
-    for word in query_words:
-        if len(word) >= 3 and word in description:
-            score += 5.0
+    categories = [str(c).lower() for c in gift.get("categories", [])]
+    interests = [str(i).lower() for i in gift.get("interests", [])]
+    occasions = [str(o).lower() for o in gift.get("occasions", [])]
 
-    # Check categories
-    categories = gift.get("categories", [])
-    for word in query_words:
-        if any(word in str(cat).lower() for cat in categories):
-            score += 7.0
+    # Track if ANY word matches (to avoid scoring irrelevant items)
+    has_any_match = False
 
-    # Check interests
-    interests = gift.get("interests", [])
+    # Check each query word
     for word in query_words:
-        if any(word in str(interest).lower() for interest in interests):
-            score += 5.0
+        if len(word) < 3:  # Skip very short words like "a", "is", "of"
+            continue
 
-    # Check occasions
-    occasions = gift.get("occasions", [])
-    for word in query_words:
-        if any(word in str(occ).lower() for occ in occasions):
-            score += 3.0
+        # Name match (highest weight)
+        if word in name:
+            score += 15.0
+            has_any_match = True
+
+        # Description match (medium weight)
+        if word in description:
+            score += 8.0
+            has_any_match = True
+
+        # Interest match (HIGHEST weight - this is key!)
+        for interest in interests:
+            if word in interest or interest in word:
+                score += 20.0  # Interests are very important
+                has_any_match = True
+
+        # Category match (high weight)
+        for category in categories:
+            if word in category or category in word:
+                score += 12.0
+                has_any_match = True
+
+        # Occasion match (medium weight)
+        for occasion in occasions:
+            if word in occasion or occasion in word:
+                score += 5.0
+                has_any_match = True
+
+    # If NO words matched at all, return very low score
+    if not has_any_match:
+        return 0.0
+
+    # Boost if multiple query words match
+    matched_words = sum(1 for word in query_words if len(word) >= 3 and (
+            word in name or
+            word in description or
+            any(word in interest for interest in interests)
+    ))
+
+    if matched_words > 1:
+        score += matched_words * 3.0  # Bonus for multiple matches
+
+    logger.debug(f"Gift: {gift.get('name')[:40]} | Query score: {score:.1f}")
 
     return score
 
@@ -187,7 +221,7 @@ def retrieve_gifts(
     preferences = normalize_preferences(preferences)
 
     try:
-        # 1. Get Supabase client (FIXED)
+        # 1. Get Supabase client
         supabase = get_supabase_client()
         logger.info("✓ Supabase client initialized")
 
