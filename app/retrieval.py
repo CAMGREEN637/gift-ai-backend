@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from typing import List, Dict, Optional
 import logging
+import traceback
 
 from app.persistence import get_feedback
 
@@ -250,7 +251,6 @@ def retrieve_gifts(
 
     except Exception as e:
         logger.error(f"Error retrieving gifts from Supabase: {str(e)}")
-        import traceback
         logger.error(traceback.format_exc())
         return []
 
@@ -279,24 +279,33 @@ def retrieve_gifts(
             "ranking_reasons": build_ranking_reasons(gift, score_data),
         })
 
-        logger.debug(f"Gift: {gift.get('name')[:30]}... Score: {total_score}")
+        logger.debug(f"Gift: {gift.get('name', '')[:30]}... Score: {total_score}")
 
     # 5. Sort by score (highest first)
     scored.sort(key=lambda g: g["score"], reverse=True)
 
-    # 6. Compute relative confidence
+    # ⭐ NEW: Filter out gifts with zero or negative scores
+    scored = [g for g in scored if g["score"] > 0]
+
+    logger.info(f"✓ After filtering: {len(scored)} relevant gifts remain")
+
+    # 6. If we have fewer than k relevant gifts, that's OK - return what we have
+    if len(scored) < k:
+        logger.info(f"Only {len(scored)} relevant gifts found (requested {k})")
+
+    # 7. Compute relative confidence
     scores = [g["score"] for g in scored]
     confidences = compute_relative_confidences(scores)
 
-    # 7. Attach confidence to each gift
+    # 8. Attach confidence to each gift
     for gift, conf in zip(scored, confidences):
         gift["confidence"] = conf
 
-    # 8. Return top k results
+    # 9. Return top k results (or fewer if not enough relevant gifts)
     top_gifts = scored[:k]
 
     logger.info(f"✓ Returning {len(top_gifts)} top-scored gifts")
     if top_gifts:
-        logger.info(f"Top gift: {top_gifts[0].get('name')} (score: {top_gifts[0].get('score')})")
+        logger.info(f"Top gift: {top_gifts[0].get('name', '')} (score: {top_gifts[0].get('score')})")
 
     return top_gifts

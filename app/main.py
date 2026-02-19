@@ -435,3 +435,106 @@ async def debug_score_details(query: str = "coffee"):
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/debug/full-pipeline")
+async def debug_full_pipeline(query: str = "coffee"):
+    """Debug the complete pipeline from retrieval to LLM"""
+    from app.retrieval import retrieve_gifts
+    from app.llm import generate_gift_response
+
+    logger.info("=== STARTING FULL PIPELINE DEBUG for query: " + query + " ===")
+
+    # Step 1: Retrieval
+    logger.info("Step 1: Calling retrieve_gifts...")
+    gifts = retrieve_gifts(
+        query=query,
+        user_id=None,
+        k=5,
+        max_price=None,
+        preferences={"interests": [], "vibe": []}
+    )
+
+    retrieval_results = []
+    for i, gift in enumerate(gifts, 1):
+        result = {
+            "rank": i,
+            "name": gift.get("name"),
+            "score": gift.get("score"),
+            "confidence": gift.get("confidence"),
+            "interests": gift.get("interests"),
+            "has_coffee": "coffee" in str(gift.get("interests")).lower() or "coffee" in gift.get("name", "").lower()
+        }
+        retrieval_results.append(result)
+        name_preview = gift.get("name", "")[:40]
+        score = gift.get("score")
+        conf = gift.get("confidence")
+        logger.info("  Rank %d: %s | Score: %s | Conf: %s" % (i, name_preview, score, conf))
+
+    # Step 2: LLM Processing
+    logger.info("Step 2: Calling generate_gift_response...")
+    llm_response, tokens = generate_gift_response(
+        query=query,
+        gifts=gifts,
+        preferences={"interests": [], "vibe": []}
+    )
+
+    llm_results = []
+    for i, gift in enumerate(llm_response.get("gifts", []), 1):
+        result = {
+            "rank": i,
+            "name": gift.get("name"),
+            "confidence": gift.get("confidence"),
+        }
+        llm_results.append(result)
+        name_preview = gift.get("name", "")[:40]
+        conf = gift.get("confidence")
+        logger.info("  Final Rank %d: %s | Conf: %s" % (i, name_preview, conf))
+
+    logger.info("=== PIPELINE DEBUG COMPLETE ===")
+
+    return {
+        "query": query,
+        "step_1_retrieval": {
+            "count": len(retrieval_results),
+            "gifts": retrieval_results
+        },
+        "step_2_llm": {
+            "count": len(llm_results),
+            "gifts": llm_results
+        },
+        "comparison": {
+            "order_preserved": [r["name"] for r in retrieval_results] == [l["name"] for l in llm_results],
+            "retrieval_order": [r["name"] for r in retrieval_results],
+            "llm_order": [l["name"] for l in llm_results]
+        }
+    }
+
+
+@app.get("/debug/retrieval-only")
+async def debug_retrieval_only(query: str = "coffee"):
+    """Test retrieval without LLM processing"""
+    from app.retrieval import retrieve_gifts
+
+    gifts = retrieve_gifts(
+        query=query,
+        user_id=None,
+        k=10,
+        max_price=None,
+        preferences={"interests": [], "vibe": []}
+    )
+
+    return {
+        "query": query,
+        "count": len(gifts),
+        "gifts": [
+            {
+                "name": g.get("name"),
+                "score": g.get("score"),
+                "confidence": g.get("confidence"),
+                "interests": g.get("interests"),
+                "has_coffee": "coffee" in str(g.get("interests")).lower() or "coffee" in g.get("name", "").lower()
+            }
+            for g in gifts
+        ]
+    }
