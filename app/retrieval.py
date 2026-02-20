@@ -13,9 +13,23 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logger = logging.getLogger(__name__)
 
+# --------------------------------------------------
+# CONFIG: Stop Words
+# --------------------------------------------------
+# These words will be ignored if the query contains other specific keywords.
+STOP_WORDS = {
+    "gift", "gifts", "present", "presents", "idea", "ideas",
+    "for", "of", "the", "and", "a", "to", "in", "is", "with",
+    "my", "your", "our", "who", "that", "which",
+    "likes", "loves", "wants", "needs", "enjoy", "enjoys",
+    "girlfriend", "boyfriend", "wife", "husband", "mom", "dad",
+    "mother", "father", "sister", "brother", "friend", "best",
+    "looking", "search", "find", "give", "get", "buy", "recommendation"
+}
+
 
 # --------------------------------------------------
-# FIX: Get Supabase client correctly
+# Supabase Client
 # --------------------------------------------------
 
 def get_supabase_client():
@@ -64,14 +78,13 @@ def compute_score(
 ) -> Dict:
     """
     Compute preference-based scoring (interests/vibe from user profile).
-    Reduced weight so query relevance takes priority.
     """
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
 
     # Lower weight for preferences so they don't override query match
-    interest_score = len(interest_matches) * 2.0  # Reduced from 3
-    vibe_score = len(vibe_matches) * 1.0  # Reduced from 2
+    interest_score = len(interest_matches) * 2.0
+    vibe_score = len(vibe_matches) * 1.0
 
     feedback_score = 0
     if user_id:
@@ -95,11 +108,22 @@ def compute_score(
 def semantic_score_from_query_match(gift: Dict, query: str) -> float:
     """
     Score based on keyword matching with query.
-    Start at 0 to ensure only relevant gifts score high.
+    Includes STOP WORD filtering to fix "gift for girlfriend" issues.
     """
-    score = 0.0  # Start at 0 instead of 5.0
+    score = 0.0
     query_lower = query.lower()
-    query_words = query_lower.split()
+    raw_words = query_lower.split()
+
+    # --- FIX: Stop Word Logic ---
+    # 1. Try to filter out noise words
+    meaningful_words = [w for w in raw_words if w not in STOP_WORDS and len(w) > 2]
+
+    # 2. If filtering removed EVERYTHING (e.g. query was just "gift for girlfriend"),
+    #    fall back to the original words so we still return something.
+    if not meaningful_words:
+        query_words = [w for w in raw_words if len(w) > 2]
+    else:
+        query_words = meaningful_words
 
     # Extract searchable text from gift
     name = gift.get("name", "").lower()
@@ -108,57 +132,49 @@ def semantic_score_from_query_match(gift: Dict, query: str) -> float:
     interests = [str(i).lower() for i in gift.get("interests", [])]
     occasions = [str(o).lower() for o in gift.get("occasions", [])]
 
-    # Track if ANY word matches (to avoid scoring irrelevant items)
+    # Track matches
     has_any_match = False
 
-    # Check each query word
     for word in query_words:
-        if len(word) < 3:  # Skip very short words like "a", "is", "of"
-            continue
-
-        # Name match (highest weight)
+        # Name match (Highest)
         if word in name:
             score += 15.0
             has_any_match = True
 
-        # Description match (medium weight)
-        if word in description:
-            score += 8.0
-            has_any_match = True
-
-        # Interest match (HIGHEST weight - this is key!)
+        # Interest match (Very High)
         for interest in interests:
             if word in interest or interest in word:
-                score += 20.0  # Interests are very important
+                score += 20.0
                 has_any_match = True
 
-        # Category match (high weight)
+        # Category match (High)
         for category in categories:
             if word in category or category in word:
                 score += 12.0
                 has_any_match = True
 
-        # Occasion match (medium weight)
+        # Description match (Medium)
+        if word in description:
+            score += 8.0
+            has_any_match = True
+
+        # Occasion match (Medium)
         for occasion in occasions:
             if word in occasion or occasion in word:
                 score += 5.0
                 has_any_match = True
 
-    # If NO words matched at all, return very low score
     if not has_any_match:
         return 0.0
 
-    # Boost if multiple query words match
-    matched_words = sum(1 for word in query_words if len(word) >= 3 and (
-            word in name or
-            word in description or
-            any(word in interest for interest in interests)
-    ))
+    # Bonus for multiple keyword matches
+    matched_count = sum(1 for word in query_words if word in name or word in description)
+    if matched_count > 1:
+        score += matched_count * 3.0
 
-    if matched_words > 1:
-        score += matched_words * 3.0  # Bonus for multiple matches
-
-    logger.debug(f"Gift: {gift.get('name')[:40]} | Query score: {score:.1f}")
+    # Debug log to see what's happening
+    if score > 0:
+        logger.debug(f"Gift: {gift.get('name')[:30]} | Matched: {query_words} | Score: {score}")
 
     return score
 
@@ -173,7 +189,6 @@ def compute_relative_confidences(scores: List[float]) -> List[float]:
     min_score = min(scores)
     max_score = max(scores)
 
-    # All equal → default confidence
     if min_score == max_score:
         return [0.6 for _ in scores]
 
@@ -199,7 +214,7 @@ def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
         reasons.append("You liked something similar before")
 
     if not reasons:
-        reasons.append("Relevant to your search")
+        reasons.append("Matches your search criteria")
 
     return reasons
 
@@ -229,17 +244,12 @@ def retrieve_gifts(
         # 2. Query gifts from Supabase
         db_query = supabase.table('gifts').select('*')
 
-        # Apply price filter at database level if specified
         if max_price is not None:
             db_query = db_query.lte('price', max_price)
 
-        # Only get in-stock items
         db_query = db_query.eq('in_stock', True)
-
-        # Get more results for better filtering (50 max)
         db_query = db_query.order('created_at', desc=True).limit(50)
 
-        # Execute query
         response = db_query.execute()
 
         if not response.data:
@@ -261,16 +271,11 @@ def retrieve_gifts(
         g["categories"] = normalize_list_field(g.get("categories", []))
         g["occasions"] = normalize_list_field(g.get("occasions", []))
 
-    # 4. Score gifts (semantic + heuristic)
+    # 4. Score gifts
     scored = []
     for gift in gifts:
-        # Compute heuristic score (interests, vibe, feedback)
         score_data = compute_score(gift, preferences, user_id)
-
-        # Compute semantic score based on query matching
         semantic_score = semantic_score_from_query_match(gift, query)
-
-        # Combine scores
         total_score = score_data["total"] + semantic_score
 
         scored.append({
@@ -279,29 +284,21 @@ def retrieve_gifts(
             "ranking_reasons": build_ranking_reasons(gift, score_data),
         })
 
-        logger.debug(f"Gift: {gift.get('name', '')[:30]}... Score: {total_score}")
-
-    # 5. Sort by score (highest first)
+    # 5. Sort by score
     scored.sort(key=lambda g: g["score"], reverse=True)
 
-    # ⭐ NEW: Filter out gifts with zero or negative scores
+    # 6. FILTER: Remove zero scores
     scored = [g for g in scored if g["score"] > 0]
-
     logger.info(f"✓ After filtering: {len(scored)} relevant gifts remain")
-
-    # 6. If we have fewer than k relevant gifts, that's OK - return what we have
-    if len(scored) < k:
-        logger.info(f"Only {len(scored)} relevant gifts found (requested {k})")
 
     # 7. Compute relative confidence
     scores = [g["score"] for g in scored]
     confidences = compute_relative_confidences(scores)
 
-    # 8. Attach confidence to each gift
     for gift, conf in zip(scored, confidences):
         gift["confidence"] = conf
 
-    # 9. Return top k results (or fewer if not enough relevant gifts)
+    # 8. Return top k results
     top_gifts = scored[:k]
 
     logger.info(f"✓ Returning {len(top_gifts)} top-scored gifts")
