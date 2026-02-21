@@ -1,7 +1,8 @@
 import os
 import logging
 import traceback
-from typing import List, Dict, Optional
+import re
+from typing import List, Dict, Optional, Set
 from dotenv import load_dotenv
 
 from app.embeddings import generate_embedding
@@ -9,6 +10,17 @@ from app.persistence import get_feedback
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------
+# Constants & Configuration
+# --------------------------------------------------
+
+# Common words to ignore when extracting keywords for boosting
+STOPWORDS = {
+    "a", "an", "the", "for", "of", "in", "to", "with", "who", "that",
+    "gift", "gifts", "idea", "ideas", "likes", "loves", "wants", "need",
+    "girlfriend", "boyfriend", "wife", "husband", "friend", "best", "good"
+}
 
 
 # --------------------------------------------------
@@ -50,26 +62,41 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
     }
 
 
+def extract_keywords(query: str) -> Set[str]:
+    """Extract meaningful content words from the query for explicit boosting."""
+    if not query:
+        return set()
+    # Remove punctuation and split
+    tokens = re.findall(r'\w+', query.lower())
+    # Filter out stopwords
+    keywords = {t for t in tokens if t not in STOPWORDS and len(t) > 2}
+    return keywords
+
+
 # --------------------------------------------------
-# Scoring Logic (Personalization)
+# Scoring Logic (Personalization + Keywords)
 # --------------------------------------------------
 
 def compute_profile_score(
         gift: Dict,
         preferences: Dict,
-        user_id: Optional[str]
+        user_id: Optional[str],
+        query_keywords: Set[str]
 ) -> Dict:
     """
-    Compute preference-based scoring (interests/vibe from user profile).
-    This adds a 'boost' to the vector similarity score.
+    Compute scoring based on:
+    1. Profile Matches (Interests/Vibe)
+    2. User Feedback History
+    3. Explicit Query Keyword Matches (The fix for "coffee")
     """
+    # 1. Profile Matches
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
 
-    # Weighting: Interests are worth more than vibes
     interest_score = len(interest_matches) * 5.0
     vibe_score = len(vibe_matches) * 3.0
 
+    # 2. Feedback History
     feedback_score = 0
     if user_id:
         history = get_feedback(user_id)
@@ -77,7 +104,25 @@ def compute_profile_score(
             if entry["gift_name"] == gift["name"]:
                 feedback_score += 5 if entry["liked"] else -10
 
-    total_score = interest_score + vibe_score + feedback_score
+    # 3. Keyword Boosting (Fix for retrieval relevance)
+    # Check if 'coffee' from query is in the gift name or tags
+    keyword_score = 0
+    matched_keywords = []
+
+    # Combine searchable text fields
+    gift_text_blob = (
+            gift.get("name", "") + " " +
+            " ".join(gift.get("interests", [])) + " " +
+            gift.get("description", "")
+    ).lower()
+
+    for kw in query_keywords:
+        if kw in gift_text_blob:
+            # Heavy boost if keyword is found (pushes 'coffee' items to top)
+            keyword_score += 15.0
+            matched_keywords.append(kw)
+
+    total_score = interest_score + vibe_score + feedback_score + keyword_score
 
     return {
         "total": total_score,
@@ -85,6 +130,8 @@ def compute_profile_score(
             "interest_match": len(interest_matches),
             "vibe_match": len(vibe_matches),
             "feedback": feedback_score,
+            "keyword_match": len(matched_keywords),
+            "matched_keywords": matched_keywords
         },
     }
 
@@ -92,29 +139,24 @@ def compute_profile_score(
 def compute_hybrid_confidence(scores: List[float]) -> List[float]:
     """
     Convert raw scores into confidence values.
-    Uses 'Absolute' quality + 'Relative' ranking.
-    Prevents the 'everything is 60%' issue.
     """
     if not scores:
         return []
 
     # ANCHOR_SCORE: What we consider a "Great" match.
-    # Vector similarity is 0-100. A similarity of 80 (0.8) is usually very good.
-    # Plus profile points (e.g., +10). So ~85 is a strong anchor.
+    # Now that we have Keyword Boosting (+15), a relevant item (Vector ~75 + Boost 15 = 90)
+    # will easily beat the Anchor of 82.
     ANCHOR_SCORE = 82.0
 
     confidences = []
     max_score = max(scores)
 
     for s in scores:
-        # 1. Absolute Score: How good is this mathematically?
-        # If score is > Anchor, we approach 95%. If low, we drop.
-        # Logic: 0.50 base + up to 0.45 based on closeness to anchor
-        ratio = min(s / ANCHOR_SCORE, 1.2)  # Cap at 1.2x anchor
+        # 1. Absolute Score
+        ratio = min(s / ANCHOR_SCORE, 1.2)
         absolute_conf = 0.50 + (0.45 * ratio)
 
-        # 2. Relative Boost: Is this the specific winner?
-        # If this is the #1 result and it has a decent gap, boost it.
+        # 2. Relative Boost
         relative_boost = 0.0
         if s == max_score and len(scores) > 1:
             relative_boost = 0.03
@@ -128,6 +170,11 @@ def compute_hybrid_confidence(scores: List[float]) -> List[float]:
 def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
     reasons = []
 
+    # Explicit keyword reasons first
+    if score_data["breakdown"]["keyword_match"] > 0:
+        kws = ", ".join(score_data["breakdown"]["matched_keywords"][:2])
+        reasons.append(f"Matches search term '{kws}'")
+
     if score_data["breakdown"]["interest_match"] > 0:
         reasons.append("Matches your interests")
 
@@ -137,7 +184,6 @@ def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
     if score_data["breakdown"]["feedback"] > 0:
         reasons.append("You liked something similar before")
 
-    # If no specific profile reasons, fallback to vector context
     if not reasons:
         reasons.append("Matches your search description")
 
@@ -156,10 +202,11 @@ def retrieve_gifts(
         preferences: Optional[Dict] = None,
 ) -> List[Dict]:
     """
-    Retrieve gifts using vector similarity search (Supabase pgvector).
-    CRITICAL: Always returns a list (never None).
+    Retrieve gifts using vector similarity search (Supabase pgvector)
+    plus Keyword Boosting for relevance.
     """
     preferences = normalize_preferences(preferences)
+    query_keywords = extract_keywords(query)
 
     try:
         supabase = get_supabase_client()
@@ -170,23 +217,22 @@ def retrieve_gifts(
 
         if not query_embedding:
             logger.error("Failed to generate query embedding")
-            return []  # ← Return empty list, not None
+            return []
 
         # 2. Vector Search (RPC Call)
-        # We lower the threshold slightly (0.3) to ensure we get enough candidates
-        # to filter through, but high enough to exclude total junk.
+        # FIX: Increased threshold from 0.3 to 0.5 to reduce irrelevant noise
         response = supabase.rpc(
             'match_gifts',
             {
                 'query_embedding': query_embedding,
-                'match_threshold': 0.3,
+                'match_threshold': 0.5,
                 'match_count': 20
             }
         ).execute()
 
         if not response.data:
             logger.warning("No gifts found via vector search")
-            return []  # ← Return empty list, not None
+            return []
 
         gifts = response.data
         logger.info("✓ Retrieved %d gifts via vector search" % len(gifts))
@@ -194,7 +240,7 @@ def retrieve_gifts(
     except Exception as e:
         logger.error("Error in vector search: " + str(e))
         logger.error(traceback.format_exc())
-        return []  # ← Return empty list, not None
+        return []
 
     # 3. Process and Score Results
     scored = []
@@ -206,13 +252,11 @@ def retrieve_gifts(
         g["categories"] = normalize_list_field(g.get("categories", []))
         g["occasions"] = normalize_list_field(g.get("occasions", []))
 
-        # Base Vector Score (Convert 0-1 float to 0-100 score)
-        # OpenAI embeddings usually range 0.70-0.90 for relevant items.
-        # We multiply by 100 to make it easier to work with.
+        # Base Vector Score (0-100)
         vector_score = g.get('similarity', 0) * 100
 
-        # Personalization Score (Profile Matches)
-        profile_data = compute_profile_score(g, preferences, user_id)
+        # Personalization & Keyword Score
+        profile_data = compute_profile_score(g, preferences, user_id, query_keywords)
 
         # Final Combined Score
         total_score = vector_score + profile_data["total"]
@@ -246,4 +290,4 @@ def retrieve_gifts(
     if top_gifts:
         logger.info("Top gift: " + top_gifts[0].get('name', '') + " (score: " + str(top_gifts[0].get('score')) + ")")
 
-    return top_gifts  # ← Always returns a list (could be empty, never None)
+    return top_gifts
