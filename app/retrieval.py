@@ -4,8 +4,6 @@ import traceback
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
-# We no longer need OpenAI here for embeddings generation 
-# if we import the helper, but we keep the client setup just in case.
 from app.embeddings import generate_embedding
 from app.persistence import get_feedback
 
@@ -159,6 +157,7 @@ def retrieve_gifts(
 ) -> List[Dict]:
     """
     Retrieve gifts using vector similarity search (Supabase pgvector).
+    CRITICAL: Always returns a list (never None).
     """
     preferences = normalize_preferences(preferences)
 
@@ -171,7 +170,7 @@ def retrieve_gifts(
 
         if not query_embedding:
             logger.error("Failed to generate query embedding")
-            return []
+            return []  # ← Return empty list, not None
 
         # 2. Vector Search (RPC Call)
         # We lower the threshold slightly (0.3) to ensure we get enough candidates
@@ -187,7 +186,7 @@ def retrieve_gifts(
 
         if not response.data:
             logger.warning("No gifts found via vector search")
-            return []
+            return []  # ← Return empty list, not None
 
         gifts = response.data
         logger.info("✓ Retrieved %d gifts via vector search" % len(gifts))
@@ -195,7 +194,7 @@ def retrieve_gifts(
     except Exception as e:
         logger.error("Error in vector search: " + str(e))
         logger.error(traceback.format_exc())
-        return []
+        return []  # ← Return empty list, not None
 
     # 3. Process and Score Results
     scored = []
@@ -233,4 +232,18 @@ def retrieve_gifts(
         scored = [g for g in scored if g.get("price", 0) <= max_price]
 
     # 6. Calculate Confidence
-    # We take the scores and map them to a user
+    scores = [g["score"] for g in scored]
+    confidences = compute_hybrid_confidence(scores)
+
+    # 7. Attach confidence to each gift
+    for gift, conf in zip(scored, confidences):
+        gift["confidence"] = conf
+
+    # 8. Return top k results
+    top_gifts = scored[:k]
+
+    logger.info("✓ Returning %d top-scored gifts" % len(top_gifts))
+    if top_gifts:
+        logger.info("Top gift: " + top_gifts[0].get('name', '') + " (score: " + str(top_gifts[0].get('score')) + ")")
+
+    return top_gifts  # ← Always returns a list (could be empty, never None)
