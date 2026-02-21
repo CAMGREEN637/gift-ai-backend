@@ -1,4 +1,3 @@
-#llm.py
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
@@ -7,7 +6,6 @@ import json
 import logging
 
 load_dotenv()
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logger = logging.getLogger(__name__)
 
@@ -19,131 +17,136 @@ def generate_gift_response(
 ) -> tuple[Dict, int]:
     """
     Generates a natural language explanation of gift recommendations.
-    CRITICAL: Preserves the exact order from retrieval.
-
-    Returns:
-        Tuple of (response_data, tokens_used)
+    Uses JSON mode for reliability and enforces strict adherence to retrieval order.
     """
 
-    # ---------- Preference context ----------
+    # Safety check: handle empty or None gifts
+    if not gifts:
+        logger.warning("No gifts provided to generate_gift_response")
+        return {
+            "intro": "I couldn't find any perfect matches. Try adjusting your search!",
+            "gifts": []
+        }, 0
 
+    # ---------- Preference context ----------
+    pref_text = "None provided"
     if preferences:
-        pref_text = f"""
-User preferences (if any):
-- Interests: {preferences.get("interests", [])}
-- Vibe: {preferences.get("vibe", [])}
-"""
-    else:
-        pref_text = "User did not provide explicit preferences."
+        interests = preferences.get('interests', [])
+        vibes = preferences.get('vibe', [])
+        pref_text = "Interests: " + str(interests) + ", Vibe: " + str(vibes)
 
     # ---------- Gift context for LLM ----------
-    # Number the gifts so LLM knows their rank order
-
     gift_context = ""
     for i, gift in enumerate(gifts, 1):
-        gift_context += f"""
-Gift #{i} (Rank {i}):
-Name: {gift['name']}
-Price: ${gift['price']}
-Confidence: {gift['confidence']}
-Ranking reasons: {', '.join(gift.get('ranking_reasons', [])) or 'Matches your search'}
-Description: {gift.get('description', '')[:200]}...
+        # We pass the 'breakdown' info so the LLM knows WHY it was picked
+        reasons = ", ".join(gift.get('ranking_reasons', []))
+        name = gift.get('name', '')
+        conf = gift.get('confidence', 0) * 100
+        desc = gift.get('description', '')[:250]
+
+        gift_context += """
+Gift #%d:
+Name: %s
+Confidence: %.0f%%
+Key Features: %s
+Description: %s
 ---
-"""
+""" % (i, name, conf, reasons, desc)
 
-    system_prompt = f"""
-You are a thoughtful gift recommendation assistant.
+    # SYSTEM PROMPT: Focused on honesty and rank preservation
+    system_prompt = """
+You are an expert personal shopper. Use the user's query and profile to explain recommendations.
 
-{pref_text}
+USER PROFILE: %s
 
-CRITICAL RULES:
-- Gifts are already ranked by relevance (Gift #1 is BEST match)
-- You MUST explain gifts in the EXACT order provided
-- Do NOT reorder or skip gifts
-- Do NOT invent facts or preferences
-- Keep explanations concise (1-2 sentences per gift)
-"""
+STRICT RULES:
+1. EXPLAIN items in the EXACT numerical order provided.
+2. If an item has low confidence (e.g., < 70%%), acknowledge it might be a creative alternative.
+3. If an item has high confidence, highlight the specific keyword or interest match.
+4. Keep explanations to 1-2 punchy, persuasive sentences.
+5. You must respond in valid JSON format.
+""" % pref_text
 
-    user_prompt = f"""
-User query: "{query}"
+    user_prompt = """
+User query: "%s"
 
-Return STRICT JSON with gifts in the EXACT same order:
-
-{{
-  "intro": "one brief sentence introducing the recommendations",
+JSON Structure:
+{
+  "intro": "A warm 1-sentence opening",
   "gifts": [
-    {{
-      "name": "exact gift name from list",
-      "reason": "1-2 sentence explanation of why this gift matches the query"
-    }}
+    {
+      "name": "Exact name from list",
+      "reason": "Your personalized explanation"
+    }
   ]
-}}
+}
 
-Gifts (ALREADY RANKED - explain in this order):
-{gift_context}
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.3  # Lower temperature for more consistent ordering
-    )
-
-    # Extract token usage from response
-    tokens_used = response.usage.total_tokens if response.usage else 0
-
-    content = response.choices[0].message.content
+Gifts to process:
+%s
+""" % (query, gift_context)
 
     try:
+        # Use response_format={"type": "json_object"} for GPT-4o-mini
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2  # Lower for even more precision
+        )
+
+        tokens_used = response.usage.total_tokens if response.usage else 0
+        content = response.choices[0].message.content
+
         # Strip markdown code fences if present
         if content.startswith("```json"):
             content = content.replace("```json", "").replace("```", "").strip()
+
         parsed = json.loads(content)
+
     except Exception as e:
-        logger.error(f"Failed to parse LLM response: {e}")
-        parsed = {"intro": "", "gifts": []}
+        logger.error("LLM Generation or Parsing failed: " + str(e))
+        import traceback
+        logger.error(traceback.format_exc())
+        parsed = {"intro": "Here are some gifts I found for you:", "gifts": []}
+        tokens_used = 0
 
-    # ---------- CRITICAL: Preserve retrieval order ----------
-    # Do NOT use LLM's order - use the original gifts order
-
+    # ---------- Re-sync with Retrieval Order (The Fail-Safe) ----------
     enriched = []
+    llm_results = {}
+
+    for g in parsed.get("gifts", []):
+        name = g.get("name", "").lower()
+        reason = g.get("reason", "")
+        llm_results[name] = reason
 
     for original in gifts:
-        # Find the matching LLM explanation (if any)
-        llm_match = next(
-            (g for g in parsed.get("gifts", [])
-             if g.get("name", "").lower() == original["name"].lower()),
-            None
-        )
+        # Fallback if LLM missed an item or renamed it
+        reason = llm_results.get(original["name"].lower())
 
-        # Build enriched gift preserving ALL fields
-        enriched_gift = {
+        if not reason:
+            # Generate a fallback reason
+            interests = original.get('interests', [])[:2]
+            if interests:
+                reason = "A great choice that aligns with your interest in " + ", ".join(interests) + "."
+            else:
+                reason = "A thoughtful gift that matches your search criteria."
+
+        enriched.append({
             "name": original["name"],
             "price": original["price"],
             "confidence": original.get("confidence", 0),
             "description": original.get("description", ""),
             "image_url": original.get("image_url", ""),
-            "product_url": original.get("link", ""),  # Map 'link' to 'product_url'
+            "product_url": original.get("link", "") or original.get("product_url", ""),
             "ranking_reasons": original.get("ranking_reasons", []),
-            "reason": llm_match.get("reason") if llm_match else
-            f"This gift matches your search for {query}.",
-        }
+            "reason": reason
+        })
 
-        enriched.append(enriched_gift)
+    intro = parsed.get("intro", "Here are some great gifts for you:")
 
-        logger.debug(f"Gift #{len(enriched)}: {original['name']} (conf: {original.get('confidence')})")
+    logger.info("Generated response with %d gifts" % len(enriched))
 
-    response_data = {
-        "intro": parsed.get(
-            "intro",
-            f"Here are some thoughtful gifts for your search:"
-        ),
-        "gifts": enriched
-    }
-
-    logger.info(f"Returning {len(enriched)} gifts in retrieval order")
-
-    return response_data, tokens_used
+    return {"intro": intro, "gifts": enriched}, tokens_used
