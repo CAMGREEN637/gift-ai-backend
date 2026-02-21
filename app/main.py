@@ -538,3 +538,67 @@ async def debug_retrieval_only(query: str = "coffee"):
             for g in gifts
         ]
     }
+
+
+@app.post("/admin/generate-embeddings")
+async def generate_embeddings_for_all_gifts():
+    """
+    Generate embeddings for all gifts that don't have one.
+    Run this once after adding the embedding column.
+    """
+    from app.retrieval import get_supabase_client
+    from app.embeddings import generate_embedding, create_gift_text_for_embedding, update_gift_embedding
+    import traceback
+
+    try:
+        supabase = get_supabase_client()
+
+        # Get all gifts without embeddings
+        response = supabase.table('gifts').select('*').is_('embedding', 'null').execute()
+        gifts = response.data
+
+        logger.info("Found %d gifts without embeddings" % len(gifts))
+
+        success_count = 0
+        error_count = 0
+
+        for gift in gifts:
+            try:
+                # Create text representation
+                text = create_gift_text_for_embedding(gift)
+
+                # Generate embedding
+                logger.info("Generating embedding for: " + gift.get('name', '')[:40])
+                embedding = generate_embedding(text)
+
+                if embedding:
+                    # Save to database
+                    if update_gift_embedding(gift['id'], embedding):
+                        success_count += 1
+                        logger.info("✓ Saved embedding for: " + gift.get('name', '')[:40])
+                    else:
+                        error_count += 1
+                        logger.error("✗ Failed to save embedding for: " + gift.get('name', '')[:40])
+                else:
+                    error_count += 1
+                    logger.error("✗ Failed to generate embedding for: " + gift.get('name', '')[:40])
+
+            except Exception as e:
+                logger.error("Error processing gift " + gift.get('id', '') + ": " + str(e))
+                logger.error(traceback.format_exc())
+                error_count += 1
+
+        return {
+            "status": "complete",
+            "total_processed": len(gifts),
+            "success": success_count,
+            "errors": error_count
+        }
+
+    except Exception as e:
+        logger.error("Error in generate_embeddings: " + str(e))
+        logger.error(traceback.format_exc())
+        return {
+            "status": "error",
+            "error": str(e)
+        }

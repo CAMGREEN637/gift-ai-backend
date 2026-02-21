@@ -1,31 +1,16 @@
-# app/retrieval.py - FIXED VERSION
-
-from openai import OpenAI
 import os
-from dotenv import load_dotenv
-from typing import List, Dict, Optional
 import logging
 import traceback
+from typing import List, Dict, Optional
+from dotenv import load_dotenv
 
+# We no longer need OpenAI here for embeddings generation 
+# if we import the helper, but we keep the client setup just in case.
+from app.embeddings import generate_embedding
 from app.persistence import get_feedback
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logger = logging.getLogger(__name__)
-
-# --------------------------------------------------
-# CONFIG: Stop Words
-# --------------------------------------------------
-# These words will be ignored if the query contains other specific keywords.
-STOP_WORDS = {
-    "gift", "gifts", "present", "presents", "idea", "ideas",
-    "for", "of", "the", "and", "a", "to", "in", "is", "with",
-    "my", "your", "our", "who", "that", "which",
-    "likes", "loves", "wants", "needs", "enjoy", "enjoys",
-    "girlfriend", "boyfriend", "wife", "husband", "mom", "dad",
-    "mother", "father", "sister", "brother", "friend", "best",
-    "looking", "search", "find", "give", "get", "buy", "recommendation"
-}
 
 
 # --------------------------------------------------
@@ -68,30 +53,31 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
 
 
 # --------------------------------------------------
-# Scoring Logic - FIXED
+# Scoring Logic (Personalization)
 # --------------------------------------------------
 
-def compute_score(
+def compute_profile_score(
         gift: Dict,
         preferences: Dict,
         user_id: Optional[str]
 ) -> Dict:
     """
     Compute preference-based scoring (interests/vibe from user profile).
+    This adds a 'boost' to the vector similarity score.
     """
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
 
-    # Lower weight for preferences so they don't override query match
-    interest_score = len(interest_matches) * 2.0
-    vibe_score = len(vibe_matches) * 1.0
+    # Weighting: Interests are worth more than vibes
+    interest_score = len(interest_matches) * 5.0
+    vibe_score = len(vibe_matches) * 3.0
 
     feedback_score = 0
     if user_id:
         history = get_feedback(user_id)
         for entry in history:
             if entry["gift_name"] == gift["name"]:
-                feedback_score += 4 if entry["liked"] else -6
+                feedback_score += 5 if entry["liked"] else -10
 
     total_score = interest_score + vibe_score + feedback_score
 
@@ -105,98 +91,38 @@ def compute_score(
     }
 
 
-def semantic_score_from_query_match(gift: Dict, query: str) -> float:
+def compute_hybrid_confidence(scores: List[float]) -> List[float]:
     """
-    Score based on keyword matching with query.
-    Includes STOP WORD filtering to fix "gift for girlfriend" issues.
-    """
-    score = 0.0
-    query_lower = query.lower()
-    raw_words = query_lower.split()
-
-    # --- FIX: Stop Word Logic ---
-    # 1. Try to filter out noise words
-    meaningful_words = [w for w in raw_words if w not in STOP_WORDS and len(w) > 2]
-
-    # 2. If filtering removed EVERYTHING (e.g. query was just "gift for girlfriend"),
-    #    fall back to the original words so we still return something.
-    if not meaningful_words:
-        query_words = [w for w in raw_words if len(w) > 2]
-    else:
-        query_words = meaningful_words
-
-    # Extract searchable text from gift
-    name = gift.get("name", "").lower()
-    description = gift.get("description", "").lower()
-    categories = [str(c).lower() for c in gift.get("categories", [])]
-    interests = [str(i).lower() for i in gift.get("interests", [])]
-    occasions = [str(o).lower() for o in gift.get("occasions", [])]
-
-    # Track matches
-    has_any_match = False
-
-    for word in query_words:
-        # Name match (Highest)
-        if word in name:
-            score += 15.0
-            has_any_match = True
-
-        # Interest match (Very High)
-        for interest in interests:
-            if word in interest or interest in word:
-                score += 20.0
-                has_any_match = True
-
-        # Category match (High)
-        for category in categories:
-            if word in category or category in word:
-                score += 12.0
-                has_any_match = True
-
-        # Description match (Medium)
-        if word in description:
-            score += 8.0
-            has_any_match = True
-
-        # Occasion match (Medium)
-        for occasion in occasions:
-            if word in occasion or occasion in word:
-                score += 5.0
-                has_any_match = True
-
-    if not has_any_match:
-        return 0.0
-
-    # Bonus for multiple keyword matches
-    matched_count = sum(1 for word in query_words if word in name or word in description)
-    if matched_count > 1:
-        score += matched_count * 3.0
-
-    # Debug log to see what's happening
-    if score > 0:
-        logger.debug(f"Gift: {gift.get('name')[:30]} | Matched: {query_words} | Score: {score}")
-
-    return score
-
-
-def compute_relative_confidences(scores: List[float]) -> List[float]:
-    """
-    Convert raw scores into relative confidence values (0.55–0.95).
+    Convert raw scores into confidence values.
+    Uses 'Absolute' quality + 'Relative' ranking.
+    Prevents the 'everything is 60%' issue.
     """
     if not scores:
         return []
 
-    min_score = min(scores)
-    max_score = max(scores)
-
-    if min_score == max_score:
-        return [0.6 for _ in scores]
+    # ANCHOR_SCORE: What we consider a "Great" match.
+    # Vector similarity is 0-100. A similarity of 80 (0.8) is usually very good.
+    # Plus profile points (e.g., +10). So ~85 is a strong anchor.
+    ANCHOR_SCORE = 82.0
 
     confidences = []
+    max_score = max(scores)
+
     for s in scores:
-        normalized = (s - min_score) / (max_score - min_score)
-        confidence = 0.55 + normalized * 0.4
-        confidences.append(round(confidence, 2))
+        # 1. Absolute Score: How good is this mathematically?
+        # If score is > Anchor, we approach 95%. If low, we drop.
+        # Logic: 0.50 base + up to 0.45 based on closeness to anchor
+        ratio = min(s / ANCHOR_SCORE, 1.2)  # Cap at 1.2x anchor
+        absolute_conf = 0.50 + (0.45 * ratio)
+
+        # 2. Relative Boost: Is this the specific winner?
+        # If this is the #1 result and it has a decent gap, boost it.
+        relative_boost = 0.0
+        if s == max_score and len(scores) > 1:
+            relative_boost = 0.03
+
+        final_conf = min(0.98, absolute_conf + relative_boost)
+        confidences.append(round(final_conf, 2))
 
     return confidences
 
@@ -213,8 +139,9 @@ def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
     if score_data["breakdown"]["feedback"] > 0:
         reasons.append("You liked something similar before")
 
+    # If no specific profile reasons, fallback to vector context
     if not reasons:
-        reasons.append("Matches your search criteria")
+        reasons.append("Matches your search description")
 
     return reasons
 
@@ -231,78 +158,79 @@ def retrieve_gifts(
         preferences: Optional[Dict] = None,
 ) -> List[Dict]:
     """
-    Retrieve gifts from Supabase database and score them.
+    Retrieve gifts using vector similarity search (Supabase pgvector).
     """
-
     preferences = normalize_preferences(preferences)
 
     try:
-        # 1. Get Supabase client
         supabase = get_supabase_client()
         logger.info("✓ Supabase client initialized")
 
-        # 2. Query gifts from Supabase
-        db_query = supabase.table('gifts').select('*')
+        # 1. Generate embedding for the query
+        query_embedding = generate_embedding(query)
 
-        if max_price is not None:
-            db_query = db_query.lte('price', max_price)
+        if not query_embedding:
+            logger.error("Failed to generate query embedding")
+            return []
 
-        db_query = db_query.eq('in_stock', True)
-        db_query = db_query.order('created_at', desc=True).limit(50)
-
-        response = db_query.execute()
+        # 2. Vector Search (RPC Call)
+        # We lower the threshold slightly (0.3) to ensure we get enough candidates
+        # to filter through, but high enough to exclude total junk.
+        response = supabase.rpc(
+            'match_gifts',
+            {
+                'query_embedding': query_embedding,
+                'match_threshold': 0.3,
+                'match_count': 20
+            }
+        ).execute()
 
         if not response.data:
-            logger.warning("No gifts found in Supabase database")
+            logger.warning("No gifts found via vector search")
             return []
 
         gifts = response.data
-        logger.info(f"✓ Retrieved {len(gifts)} gifts from Supabase")
+        logger.info("✓ Retrieved %d gifts via vector search" % len(gifts))
 
     except Exception as e:
-        logger.error(f"Error retrieving gifts from Supabase: {str(e)}")
+        logger.error("Error in vector search: " + str(e))
         logger.error(traceback.format_exc())
         return []
 
-    # 3. Normalize gift metadata
+    # 3. Process and Score Results
+    scored = []
+
     for g in gifts:
+        # Normalize fields
         g["interests"] = normalize_list_field(g.get("interests", []))
         g["vibe"] = normalize_list_field(g.get("vibe", []))
         g["categories"] = normalize_list_field(g.get("categories", []))
         g["occasions"] = normalize_list_field(g.get("occasions", []))
 
-    # 4. Score gifts
-    scored = []
-    for gift in gifts:
-        score_data = compute_score(gift, preferences, user_id)
-        semantic_score = semantic_score_from_query_match(gift, query)
-        total_score = score_data["total"] + semantic_score
+        # Base Vector Score (Convert 0-1 float to 0-100 score)
+        # OpenAI embeddings usually range 0.70-0.90 for relevant items.
+        # We multiply by 100 to make it easier to work with.
+        vector_score = g.get('similarity', 0) * 100
+
+        # Personalization Score (Profile Matches)
+        profile_data = compute_profile_score(g, preferences, user_id)
+
+        # Final Combined Score
+        total_score = vector_score + profile_data["total"]
 
         scored.append({
-            **gift,
+            **g,
             "score": total_score,
-            "ranking_reasons": build_ranking_reasons(gift, score_data),
+            "vector_similarity": g.get('similarity', 0),
+            "ranking_reasons": build_ranking_reasons(g, profile_data),
         })
 
-    # 5. Sort by score
+    # 4. Sort by Score
     scored.sort(key=lambda g: g["score"], reverse=True)
 
-    # 6. FILTER: Remove zero scores
-    scored = [g for g in scored if g["score"] > 0]
-    logger.info(f"✓ After filtering: {len(scored)} relevant gifts remain")
+    # 5. Apply Hard Filters (Price)
+    if max_price is not None:
+        scored = [g for g in scored if g.get("price", 0) <= max_price]
 
-    # 7. Compute relative confidence
-    scores = [g["score"] for g in scored]
-    confidences = compute_relative_confidences(scores)
-
-    for gift, conf in zip(scored, confidences):
-        gift["confidence"] = conf
-
-    # 8. Return top k results
-    top_gifts = scored[:k]
-
-    logger.info(f"✓ Returning {len(top_gifts)} top-scored gifts")
-    if top_gifts:
-        logger.info(f"Top gift: {top_gifts[0].get('name', '')} (score: {top_gifts[0].get('score')})")
-
-    return top_gifts
+    # 6. Calculate Confidence
+    # We take the scores and map them to a user
