@@ -11,37 +11,22 @@ from app.persistence import get_feedback
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------
-# Constants & Configuration
-# --------------------------------------------------
-
-# Common words to ignore when extracting keywords for boosting
-STOPWORDS = {
-    "a", "an", "the", "for", "of", "in", "to", "with", "who", "that",
-    "gift", "gifts", "idea", "ideas", "likes", "loves", "wants", "need",
-    "girlfriend", "boyfriend", "wife", "husband", "friend", "best", "good"
-}
-
 
 # --------------------------------------------------
 # Supabase Client
 # --------------------------------------------------
 
 def get_supabase_client():
-    """Get Supabase client directly"""
     from supabase import create_client
-
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_KEY")
-
     if not url or not key:
         raise Exception("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
-
     return create_client(url, key)
 
 
 # --------------------------------------------------
-# Normalization Helpers
+# Normalization & Helpers
 # --------------------------------------------------
 
 def normalize_list_field(value) -> List[str]:
@@ -55,48 +40,69 @@ def normalize_list_field(value) -> List[str]:
 def normalize_preferences(preferences: Optional[Dict]) -> Dict:
     if not preferences:
         return {"interests": [], "vibe": []}
-
     return {
         "interests": [i.lower() for i in preferences.get("interests", [])],
         "vibe": [v.lower() for v in preferences.get("vibe", [])],
     }
 
 
-def extract_keywords(query: str) -> Set[str]:
-    """Extract meaningful content words from the query for explicit boosting."""
+def extract_query_tokens(query: str) -> Set[str]:
+    """
+    Simple, scalable tokenizer. We rely on the logic that common words
+    (the, a, for) exist in ALL gifts, so boosting them creates no bias.
+    Rare words (coffee, hiking) only exist in specific gifts, creating the boost we want.
+    """
     if not query:
         return set()
-    # Remove punctuation and split
-    tokens = re.findall(r'\w+', query.lower())
-    # Filter out stopwords
-    keywords = {t for t in tokens if t not in STOPWORDS and len(t) > 2}
-    return keywords
+    # Split by non-alphanumeric characters and lowercase
+    tokens = re.split(r'\W+', query.lower())
+    # Only keep tokens longer than 2 chars to avoid noise like 'a', 'is'
+    return {t for t in tokens if len(t) > 2}
 
 
 # --------------------------------------------------
-# Scoring Logic (Personalization + Keywords)
+# Scoring Logic
 # --------------------------------------------------
 
-def compute_profile_score(
+def compute_enhanced_score(
         gift: Dict,
         preferences: Dict,
         user_id: Optional[str],
-        query_keywords: Set[str]
+        query_tokens: Set[str]
 ) -> Dict:
     """
-    Compute scoring based on:
-    1. Profile Matches (Interests/Vibe)
-    2. User Feedback History
-    3. Explicit Query Keyword Matches (The fix for "coffee")
+    Computes a composite score based on:
+    1. Vector Similarity (Base)
+    2. Profile Matches (Interests/Vibe)
+    3. Keyword Overlap (The "Coffee" Fix)
     """
-    # 1. Profile Matches
+
+    # --- 1. Keyword Boosting (Hybrid Search Logic) ---
+    # We construct a "searchable blob" from the gift's metadata
+    gift_text = (
+            gift.get("name", "") + " " +
+            gift.get("description", "") + " " +
+            " ".join(gift.get("interests", []) or [])
+    ).lower()
+
+    matched_tokens = []
+    keyword_boost = 0.0
+
+    for token in query_tokens:
+        if token in gift_text:
+            # We give a significant boost for direct keyword matches.
+            # This ensures "Coffee" query > "Coffee Maker" gift even if vector score is weak.
+            keyword_boost += 10.0
+            matched_tokens.append(token)
+
+    # --- 2. Profile Matches ---
     interest_matches = set(gift["interests"]) & set(preferences["interests"])
     vibe_matches = set(gift["vibe"]) & set(preferences["vibe"])
 
     interest_score = len(interest_matches) * 5.0
     vibe_score = len(vibe_matches) * 3.0
 
-    # 2. Feedback History
+    # --- 3. Feedback History ---
     feedback_score = 0
     if user_id:
         history = get_feedback(user_id)
@@ -104,84 +110,56 @@ def compute_profile_score(
             if entry["gift_name"] == gift["name"]:
                 feedback_score += 5 if entry["liked"] else -10
 
-    # 3. Keyword Boosting (Fix for retrieval relevance)
-    # Check if 'coffee' from query is in the gift name or tags
-    keyword_score = 0
-    matched_keywords = []
-
-    # Combine searchable text fields
-    gift_text_blob = (
-            gift.get("name", "") + " " +
-            " ".join(gift.get("interests", [])) + " " +
-            gift.get("description", "")
-    ).lower()
-
-    for kw in query_keywords:
-        if kw in gift_text_blob:
-            # Heavy boost if keyword is found (pushes 'coffee' items to top)
-            keyword_score += 15.0
-            matched_keywords.append(kw)
-
-    total_score = interest_score + vibe_score + feedback_score + keyword_score
+    total_boost = interest_score + vibe_score + feedback_score + keyword_boost
 
     return {
-        "total": total_score,
+        "total_boost": total_boost,
         "breakdown": {
             "interest_match": len(interest_matches),
             "vibe_match": len(vibe_matches),
             "feedback": feedback_score,
-            "keyword_match": len(matched_keywords),
-            "matched_keywords": matched_keywords
+            "keyword_match": len(matched_tokens),
+            "matched_keywords": matched_tokens
         },
     }
 
 
-def compute_hybrid_confidence(scores: List[float]) -> List[float]:
+def compute_confidence(final_score: float, vector_similarity: float) -> float:
     """
-    Convert raw scores into confidence values.
+    Dynamically calculates confidence.
+    A score > 85 is generally 'High Confidence'.
     """
-    if not scores:
-        return []
+    # 1. Base confidence is the raw vector similarity (e.g. 0.82)
+    base_conf = vector_similarity
 
-    # ANCHOR_SCORE: What we consider a "Great" match.
-    # Now that we have Keyword Boosting (+15), a relevant item (Vector ~75 + Boost 15 = 90)
-    # will easily beat the Anchor of 82.
-    ANCHOR_SCORE = 82.0
+    # 2. Add confidence based on the boost score (capped at +0.15)
+    # If we have keyword matches or profile matches, we are MORE confident.
+    boost_conf = min((final_score - (vector_similarity * 100)) / 100.0, 0.15)
 
-    confidences = []
-    max_score = max(scores)
-
-    for s in scores:
-        # 1. Absolute Score
-        ratio = min(s / ANCHOR_SCORE, 1.2)
-        absolute_conf = 0.50 + (0.45 * ratio)
-
-        # 2. Relative Boost
-        relative_boost = 0.0
-        if s == max_score and len(scores) > 1:
-            relative_boost = 0.03
-
-        final_conf = min(0.98, absolute_conf + relative_boost)
-        confidences.append(round(final_conf, 2))
-
-    return confidences
+    # 3. Sum and cap at 0.99
+    return round(min(base_conf + boost_conf, 0.99), 2)
 
 
-def build_ranking_reasons(gift: Dict, score_data: Dict) -> List[str]:
+def build_ranking_reasons(gift: Dict, breakdown: Dict) -> List[str]:
+    """
+    Build ranking reasons for LLM to use.
+    This function is required by your LLM.
+    """
     reasons = []
 
-    # Explicit keyword reasons first
-    if score_data["breakdown"]["keyword_match"] > 0:
-        kws = ", ".join(score_data["breakdown"]["matched_keywords"][:2])
-        reasons.append(f"Matches search term '{kws}'")
+    if breakdown.get("keyword_match", 0) > 0:
+        keywords = breakdown.get("matched_keywords", [])
+        if keywords:
+            kws = ", ".join(keywords[:2])
+            reasons.append("Contains '" + kws + "'")
 
-    if score_data["breakdown"]["interest_match"] > 0:
+    if breakdown.get("interest_match", 0) > 0:
         reasons.append("Matches your interests")
 
-    if score_data["breakdown"]["vibe_match"] > 0:
+    if breakdown.get("vibe_match", 0) > 0:
         reasons.append("Fits your preferred vibe")
 
-    if score_data["breakdown"]["feedback"] > 0:
+    if breakdown.get("feedback", 0) > 0:
         reasons.append("You liked something similar before")
 
     if not reasons:
@@ -202,92 +180,101 @@ def retrieve_gifts(
         preferences: Optional[Dict] = None,
 ) -> List[Dict]:
     """
-    Retrieve gifts using vector similarity search (Supabase pgvector)
-    plus Keyword Boosting for relevance.
+    Retrieve gifts using vector similarity + keyword boosting.
+    CRITICAL: Always returns a list (never None).
     """
     preferences = normalize_preferences(preferences)
-    query_keywords = extract_keywords(query)
+    query_tokens = extract_query_tokens(query)
 
     try:
         supabase = get_supabase_client()
-        logger.info("✓ Supabase client initialized")
-
-        # 1. Generate embedding for the query
         query_embedding = generate_embedding(query)
 
         if not query_embedding:
-            logger.error("Failed to generate query embedding")
+            logger.error("Failed to generate embedding")
             return []
 
-        # 2. Vector Search (RPC Call)
-        # FIX: Increased threshold from 0.3 to 0.5 to reduce irrelevant noise
+        # --- STEP 1: Broad Retrieval (Fix for "No Gifts Found") ---
+        # We lower the threshold significantly (0.15) to ensure we get candidates.
+        # We increase match_count (50) to cast a wider net.
         response = supabase.rpc(
             'match_gifts',
             {
                 'query_embedding': query_embedding,
-                'match_threshold': 0.5,
-                'match_count': 20
+                'match_threshold': 0.15,
+                'match_count': 50
             }
         ).execute()
 
-        if not response.data:
-            logger.warning("No gifts found via vector search")
-            return []
-
-        gifts = response.data
-        logger.info("✓ Retrieved %d gifts via vector search" % len(gifts))
+        raw_gifts = response.data or []
+        logger.info("✓ Retrieved %d candidates from DB" % len(raw_gifts))
 
     except Exception as e:
         logger.error("Error in vector search: " + str(e))
         logger.error(traceback.format_exc())
         return []
 
-    # 3. Process and Score Results
-    scored = []
+    # --- STEP 2: Processing & Filtering ---
+    scored_candidates = []
 
-    for g in gifts:
+    for g in raw_gifts:
         # Normalize fields
         g["interests"] = normalize_list_field(g.get("interests", []))
         g["vibe"] = normalize_list_field(g.get("vibe", []))
         g["categories"] = normalize_list_field(g.get("categories", []))
         g["occasions"] = normalize_list_field(g.get("occasions", []))
 
-        # Base Vector Score (0-100)
-        vector_score = g.get('similarity', 0) * 100
+        # Base Vector Score (0-100 scale)
+        # Note: 'similarity' comes from Supabase (0.0 to 1.0)
+        vec_sim = g.get('similarity', 0)
+        vector_score = vec_sim * 100
 
-        # Personalization & Keyword Score
-        profile_data = compute_profile_score(g, preferences, user_id, query_keywords)
+        # Calculate Boosts
+        score_data = compute_enhanced_score(g, preferences, user_id, query_tokens)
 
-        # Final Combined Score
-        total_score = vector_score + profile_data["total"]
+        # Final Score
+        final_score = vector_score + score_data["total_boost"]
 
-        scored.append({
+        # --- STEP 3: The "Unrelated" Filter (Noise Reduction) ---
+        # If a gift has low vector similarity (< 0.78) AND ZERO keyword matches,
+        # it is likely random noise (e.g., generic "gift" matches). We skip it.
+        # Exception: If it has a strong profile match (interest > 0), we keep it.
+
+        is_weak_vector = vec_sim < 0.78
+        has_keywords = score_data["breakdown"]["keyword_match"] > 0
+        has_profile_match = score_data["breakdown"]["interest_match"] > 0
+
+        if is_weak_vector and not has_keywords and not has_profile_match:
+            continue  # Skip this unrelated item
+
+        # Attach metadata
+        scored_candidates.append({
             **g,
-            "score": total_score,
-            "vector_similarity": g.get('similarity', 0),
-            "ranking_reasons": build_ranking_reasons(g, profile_data),
+            "score": final_score,
+            "vector_similarity": vec_sim,
+            "breakdown": score_data["breakdown"]
         })
 
-    # 4. Sort by Score
-    scored.sort(key=lambda g: g["score"], reverse=True)
+    # --- STEP 4: Sorting & Confidence ---
+    scored_candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    # 5. Apply Hard Filters (Price)
+    # Apply Price Filter
     if max_price is not None:
-        scored = [g for g in scored if g.get("price", 0) <= max_price]
+        scored_candidates = [g for g in scored_candidates if g.get("price", 0) <= max_price]
 
-    # 6. Calculate Confidence
-    scores = [g["score"] for g in scored]
-    confidences = compute_hybrid_confidence(scores)
+    # Calculate final confidence and build ranking reasons
+    final_results = []
+    for g in scored_candidates[:k]:  # Take top K
+        g["confidence"] = compute_confidence(g["score"], g["vector_similarity"])
 
-    # 7. Attach confidence to each gift
-    for gift, conf in zip(scored, confidences):
-        gift["confidence"] = conf
+        # Build ranking reasons for LLM (REQUIRED)
+        g["ranking_reasons"] = build_ranking_reasons(g, g["breakdown"])
 
-    # 8. Return top k results
-    top_gifts = scored[:k]
+        final_results.append(g)
 
-    logger.info("✓ Returning %d top-scored gifts" % len(top_gifts))
-    if top_gifts:
-        logger.info("Top gift: " + top_gifts[0].get('name', '') + " (score: " + str(top_gifts[0].get('score')) + ")")
+    logger.info("✓ Returning %d top-scored gifts" % len(final_results))
+    if final_results:
+        logger.info(
+            "Top gift: " + final_results[0].get('name', '') + " (score: " + str(final_results[0].get('score')) + ")")
 
-    return top_gifts
+    return final_results
