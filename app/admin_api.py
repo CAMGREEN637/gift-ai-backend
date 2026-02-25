@@ -1,5 +1,8 @@
 # app/admin_api.py
 # Admin API endpoints for product management
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Header
 from typing import Optional
@@ -291,3 +294,109 @@ async def get_stats(
     except Exception as e:
         logger.error(f"Failed to get stats: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class ShippingUpdate(BaseModel):
+    shipping_min_days: int
+    shipping_max_days: int
+    is_prime_eligible: bool
+    shipping_notes: Optional[str] = None
+
+
+@router.post("/apply-shipping-defaults")
+async def apply_shipping_defaults():
+    """
+    Apply intelligent shipping defaults based on product categories.
+    This is the production-grade logic.
+    """
+    from app.retrieval import get_supabase_client
+
+    supabase = get_supabase_client()
+    updated_count = 0
+
+    # 1. Conservative default for ALL products first
+    result = supabase.table('gifts').update({
+        'shipping_min_days': 5,
+        'shipping_max_days': 8,
+        'is_prime_eligible': False
+    }).eq('source', 'amazon').execute()
+    updated_count += len(result.data)
+
+    # 2. Small tech/book items (likely Prime)
+    result = supabase.rpc('update_shipping_by_category', {
+        'category_filter': ['tech', 'book', 'kitchen'],
+        'max_price': 100,
+        'shipping_min': 2,
+        'shipping_max': 3,
+        'prime_eligible': True
+    }).execute()
+
+    # 3. Fashion/Beauty (often Prime)
+    result = supabase.rpc('update_shipping_by_category', {
+        'category_filter': ['fashion', 'beauty'],
+        'max_price': 999999,
+        'shipping_min': 3,
+        'shipping_max': 5,
+        'prime_eligible': True
+    }).execute()
+
+    # 4. Bulky home items
+    result = supabase.table('gifts').update({
+        'shipping_min_days': 7,
+        'shipping_max_days': 14,
+        'is_prime_eligible': False,
+        'shipping_notes': 'Large item - extended shipping time'
+    }).contains('categories', ['home']).gte('price', 200).execute()
+
+    # 5. Digital/Experience items
+    result = supabase.table('gifts').update({
+        'shipping_min_days': 0,
+        'shipping_max_days': 0,
+        'shipping_notes': 'Digital delivery - instant'
+    }).contains('categories', ['experiences']).execute()
+
+    return {
+        "status": "success",
+        "updated": updated_count,
+        "message": "Applied category-based shipping defaults"
+    }
+
+
+@router.patch("/gifts/{gift_id}/shipping")
+async def update_gift_shipping(gift_id: str, update: ShippingUpdate):
+    """
+    Manually override shipping for a specific product.
+    """
+    from app.retrieval import get_supabase_client
+
+    supabase = get_supabase_client()
+
+    result = supabase.table('gifts').update({
+        'shipping_min_days': update.shipping_min_days,
+        'shipping_max_days': update.shipping_max_days,
+        'is_prime_eligible': update.is_prime_eligible,
+        'shipping_notes': update.shipping_notes
+    }).eq('id', gift_id).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Gift not found")
+
+    return {"status": "updated", "gift": result.data[0]}
+
+
+@router.get("/gifts")
+async def get_all_gifts_admin():
+    """
+    Get all gifts for admin dashboard.
+    """
+    from app.retrieval import get_supabase_client
+
+    supabase = get_supabase_client()
+    response = supabase.table('gifts').select(
+        'id, name, shipping_min_days, shipping_max_days, is_prime_eligible, shipping_notes, categories'
+    ).order('name').execute()
+
+    return {"gifts": response.data}

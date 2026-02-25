@@ -189,6 +189,7 @@ def recommend(
         query: str,
         user_id: Optional[str] = None,
         max_price: Optional[int] = None,
+        days_until_needed: Optional[int] = None,
         db: Client = Depends(get_db),
         ip_address: str = Depends(check_rate_limit_dependency)
 ):
@@ -226,6 +227,7 @@ def recommend(
         query=query,
         user_id=user_id,
         max_price=max_price,
+        days_until_needed=days_until_needed,
         preferences=merged_preferences,
     )
 
@@ -391,50 +393,6 @@ async def quick_test():
         results["traceback"] = traceback.format_exc()
 
     return results
-
-@app.get("/debug/score-details")
-async def debug_score_details(query: str = "coffee"):
-    """Show detailed scoring breakdown for debugging"""
-    from app.retrieval import get_supabase_client, semantic_score_from_query_match, normalize_list_field
-
-    try:
-        supabase = get_supabase_client()
-        response = supabase.table('gifts').select('*').eq('in_stock', True).limit(20).execute()
-        gifts = response.data
-
-        results = []
-        for gift in gifts:
-            # Normalize
-            gift["interests"] = normalize_list_field(gift.get("interests", []))
-            gift["categories"] = normalize_list_field(gift.get("categories", []))
-
-            # Score
-            query_score = semantic_score_from_query_match(gift, query)
-
-            # Check what matched
-            name = gift.get("name", "").lower()
-            interests = gift.get("interests", [])
-            has_coffee = any("coffee" in str(i).lower() for i in interests) or "coffee" in name
-
-            results.append({
-                "name": gift.get("name"),
-                "query_score": round(query_score, 2),
-                "interests": interests,
-                "categories": gift.get("categories"),
-                "has_coffee_tag": has_coffee,
-                "description_preview": gift.get("description", "")[:100]
-            })
-
-        # Sort by score
-        results.sort(key=lambda x: x["query_score"], reverse=True)
-
-        return {
-            "query": query,
-            "total_gifts": len(results),
-            "top_10": results[:10]
-        }
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @app.get("/debug/full-pipeline")

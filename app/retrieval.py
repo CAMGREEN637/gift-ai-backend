@@ -36,8 +36,8 @@ RECIPIENT_WORDS = {
 }
 
 STOPWORDS = {
-    "gift", "for", "who", "likes", "that", "with",
-    "and", "the", "her", "him", "she", "he"
+    "gift", "for", "who", "likes", "that",
+    "with", "and", "the", "her", "him", "she", "he"
 }
 
 
@@ -51,7 +51,6 @@ def split_query(query: str):
 
     recipient_tokens = tokens & RECIPIENT_WORDS
     intent_tokens = tokens - RECIPIENT_WORDS - STOPWORDS
-
     intent_query = " ".join(intent_tokens)
 
     return {
@@ -73,8 +72,16 @@ def normalize_list(value):
     return []
 
 
+def normalize_preferences(preferences: Optional[Dict]) -> Dict:
+    if not preferences:
+        return {"interests": []}
+    return {
+        "interests": [i.lower() for i in preferences.get("interests", [])]
+    }
+
+
 # --------------------------------------------------
-# Scoring
+# Scoring (Intent-first architecture)
 # --------------------------------------------------
 
 def compute_score(
@@ -85,6 +92,7 @@ def compute_score(
     preferences: Dict,
     user_id: Optional[str]
 ):
+
     gift_text = (
         gift.get("name", "") + " " +
         gift.get("description", "") + " " +
@@ -92,35 +100,25 @@ def compute_score(
         " ".join(gift.get("categories", []))
     ).lower()
 
-    # ----------------------------
     # 1️⃣ HARD INTENT MATCH
-    # ----------------------------
     matched_intent = [t for t in intent_tokens if t in gift_text]
     intent_match_count = len(matched_intent)
 
     if intent_tokens and intent_match_count == 0:
-        return None  # HARD FILTER: eliminate irrelevant items
+        return None  # Hard filter
 
-    # ----------------------------
     # 2️⃣ VECTOR SCORE
-    # ----------------------------
     vector_score = vector_similarity * 100
 
-    # ----------------------------
     # 3️⃣ PROFILE MATCH
-    # ----------------------------
     interest_matches = set(gift.get("interests", [])) & set(preferences.get("interests", []))
     profile_score = len(interest_matches) * 5
 
-    # ----------------------------
     # 4️⃣ RECIPIENT SOFT BOOST
-    # ----------------------------
     recipient_matches = set(gift.get("recipient_tags", [])) & recipient_tokens
     recipient_score = 3 if recipient_matches else 0
 
-    # ----------------------------
     # 5️⃣ FEEDBACK
-    # ----------------------------
     feedback_score = 0
     if user_id:
         history = get_feedback(user_id)
@@ -128,12 +126,10 @@ def compute_score(
             if entry["gift_name"] == gift["name"]:
                 feedback_score += 5 if entry["liked"] else -10
 
-    # ----------------------------
-    # FINAL SCORE
-    # ----------------------------
-    intent_bonus = intent_match_count * 15  # Strong weight
+    # 6️⃣ INTENT BONUS
+    intent_bonus = intent_match_count * 15
 
-    final_score = (
+    base_score = (
         vector_score +
         intent_bonus +
         profile_score +
@@ -142,8 +138,9 @@ def compute_score(
     )
 
     return {
-        "score": final_score,
-        "intent_matches": matched_intent,
+        "base_score": base_score,
+        "intent_match_count": intent_match_count,
+        "matched_intent": matched_intent,
         "profile_matches": list(interest_matches),
         "recipient_matches": list(recipient_matches),
         "vector_similarity": vector_similarity
@@ -154,16 +151,7 @@ def compute_score(
 # Confidence Model (85%+ Guarantee)
 # --------------------------------------------------
 
-def compute_confidence(
-    vector_similarity: float,
-    intent_match_count: int
-):
-    """
-    Guarantees:
-    - True intent matches >= 0.65 vector → 85%+
-    - Strong matches >= 0.75 vector → 90%+
-    - No intent match → capped below 0.85
-    """
+def compute_confidence(vector_similarity: float, intent_match_count: int):
 
     if intent_match_count > 0:
         if vector_similarity >= 0.75:
@@ -179,59 +167,56 @@ def compute_confidence(
 # Ranking Reasons
 # --------------------------------------------------
 
-def build_ranking_reasons(score_data: Dict):
+def build_ranking_reasons(score_data: Dict, delivery_status: str):
     reasons = []
 
-    if score_data["intent_matches"]:
-        reasons.append(
-            "Directly matches: " +
-            ", ".join(score_data["intent_matches"])
-        )
+    if score_data["matched_intent"]:
+        reasons.append("Directly matches: " + ", ".join(score_data["matched_intent"]))
 
     if score_data["profile_matches"]:
         reasons.append("Matches her interests")
 
-    if score_data["recipient_matches"]:
-        reasons.append("Perfect for this recipient")
+    if delivery_status == "on_time":
+        reasons.append("Arrives in time")
 
     if not reasons:
-        reasons.append("Strong semantic match")
+        reasons.append("Strong match")
 
     return reasons
 
 
 # --------------------------------------------------
-# MAIN RETRIEVAL FUNCTION
+# MAIN RETRIEVAL FUNCTION (Delivery-aware)
 # --------------------------------------------------
 
 def retrieve_gifts(
     query: str,
     user_id: Optional[str] = None,
-    k: int = 5,
+    k: int = 10,
     max_price: Optional[int] = None,
+    days_until_needed: Optional[int] = None,
     preferences: Optional[Dict] = None,
 ) -> List[Dict]:
 
-    preferences = preferences or {}
+    preferences = normalize_preferences(preferences)
     parsed = split_query(query)
 
-    intent_query = parsed["intent_query"]
+    intent_query = parsed["intent_query"] or query
     intent_tokens = parsed["intent_tokens"]
     recipient_tokens = set(parsed["recipient"])
 
-    logger.info(f"Intent Query: {intent_query}")
-    logger.info(f"Intent Tokens: {intent_tokens}")
-
     try:
         supabase = get_supabase_client()
-        embedding = generate_embedding(intent_query or query)
+        embedding = generate_embedding(intent_query)
+
+        match_count = 50 if days_until_needed else 30
 
         response = supabase.rpc(
             "match_gifts",
             {
                 "query_embedding": embedding,
                 "match_threshold": 0.15,
-                "match_count": 50
+                "match_count": match_count
             }
         ).execute()
 
@@ -262,28 +247,51 @@ def retrieve_gifts(
         )
 
         if not score_data:
-            continue  # HARD FILTER applied
+            continue
+
+        # ----------------------------
+        # SOFT DELIVERY BOOST
+        # ----------------------------
+        shipping_max = g.get("shipping_max_days", 8)
+        on_time_bonus = 0
+        delivery_status = "unknown"
+
+        if days_until_needed is not None:
+            if shipping_max <= days_until_needed:
+                on_time_bonus = 50.0
+                delivery_status = "on_time"
+            elif shipping_max <= days_until_needed + 3:
+                on_time_bonus = 20.0
+                delivery_status = "tight"
+            else:
+                delivery_status = "late"
+
+        final_score = score_data["base_score"] + on_time_bonus
 
         confidence = compute_confidence(
-            vec_sim,
-            len(score_data["intent_matches"])
+            score_data["vector_similarity"],
+            score_data["intent_match_count"]
         )
 
         g.update({
-            "score": score_data["score"],
+            "score": final_score,
             "confidence": confidence,
-            "ranking_reasons": build_ranking_reasons(score_data),
+            "ranking_reasons": build_ranking_reasons(score_data, delivery_status),
+            "delivery_status": delivery_status
         })
 
         scored.append(g)
 
-    # Sort by score
+    # Sort by final score
     scored.sort(key=lambda x: x["score"], reverse=True)
 
-    # Price filter
-    if max_price:
+    # Hard price filter
+    if max_price is not None:
         scored = [g for g in scored if g.get("price", 0) <= max_price]
 
-    logger.info(f"Returning {len(scored[:k])} gifts")
+    logger.info(
+        f"Returning {len(scored[:k])} gifts "
+        f"(delivery awareness: {'enabled' if days_until_needed else 'disabled'})"
+    )
 
     return scored[:k]

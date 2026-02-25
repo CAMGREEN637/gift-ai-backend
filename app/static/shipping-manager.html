@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shipping Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50">
+  <div class="max-w-6xl mx-auto p-8">
+    <h1 class="text-3xl font-bold mb-6">🚚 Shipping Time Manager</h1>
+
+    <!-- Bulk Update Section -->
+    <div class="bg-white rounded-lg shadow p-6 mb-6">
+      <h2 class="text-xl font-semibold mb-4">Bulk Update Shipping Estimates</h2>
+      <button
+        onclick="applySmartDefaults()"
+        class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+      >
+        Apply Smart Defaults
+      </button>
+      <p class="text-sm text-slate-600 mt-2">
+        This will apply category-based shipping estimates to all products
+      </p>
+    </div>
+
+    <!-- Product List -->
+    <div class="bg-white rounded-lg shadow p-6">
+      <h2 class="text-xl font-semibold mb-4">Individual Product Overrides</h2>
+      <div id="products-list" class="space-y-3">
+        <!-- Products loaded via JS -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://localhost:8000';
+
+    async function applySmartDefaults() {
+      const response = await fetch(`${API_BASE}/admin/apply-shipping-defaults`, {
+        method: 'POST'
+      });
+      const data = await response.json();
+      alert(`Updated ${data.updated} products`);
+      loadProducts();
+    }
+
+    async function loadProducts() {
+      const response = await fetch(`${API_BASE}/admin/gifts`);
+      const data = await response.json();
+
+      const container = document.getElementById('products-list');
+      container.innerHTML = data.gifts.map(gift => `
+        <div class="border rounded p-4 hover:bg-slate-50">
+          <div class="flex justify-between items-start">
+            <div class="flex-1">
+              <h3 class="font-medium">${gift.name}</h3>
+              <p class="text-sm text-slate-600">
+                Current: ${gift.shipping_min_days}-${gift.shipping_max_days} days
+                ${gift.is_prime_eligible ? '⚡ Prime' : ''}
+              </p>
+            </div>
+            <button
+              onclick="editShipping('${gift.id}')"
+              class="text-blue-600 hover:underline text-sm"
+            >
+              Edit
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function editShipping(giftId) {
+      const min = prompt('Minimum shipping days:');
+      const max = prompt('Maximum shipping days:');
+      const prime = confirm('Is Prime eligible?');
+
+      await fetch(`${API_BASE}/admin/gifts/${giftId}/shipping`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          shipping_min_days: parseInt(min),
+          shipping_max_days: parseInt(max),
+          is_prime_eligible: prime
+        })
+      });
+
+      loadProducts();
+    }
+
+    loadProducts();
+  </script>
+</body>
+</html>
