@@ -37,37 +37,14 @@ class PartnerUpdate(PartnerBase):
     pass
 
 
-class Partner(PartnerBase):
-    id: str
-    user_id: str
-    created_at: datetime
-    updated_at: datetime
-    last_gift_search_at: Optional[datetime] = None
-
-
-class GiftHistoryCreate(BaseModel):
-    gift_id: Optional[str] = None
-    gift_name: str
-    gift_url: Optional[str] = None
-    price: Optional[float] = None
-    occasion: Optional[str] = None
-    occasion_date: Optional[date] = None
-    budget_max: Optional[int] = None
-    delivery_deadline: Optional[date] = None
-    purchased: bool = False
-    notes: Optional[str] = None
-    rating: Optional[int] = None
-
-
-# Helper to get user_id (temporary - integrate with your auth)
+# Helper to get user_id
 def get_current_user_id(db: Client = Depends(get_db)) -> str:
-    # TODO: Get from JWT/session token
-    # For now, return test user
+    # TODO: Integrate with your auth system
     return "test_user_123"
 
 
 # Endpoints
-@router.post("/", response_model=dict)
+@router.post("/")
 async def create_partner(
         partner: PartnerCreate,
         user_id: str = Depends(get_current_user_id),
@@ -89,7 +66,7 @@ async def create_partner(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/", response_model=List[dict])
+@router.get("/")
 async def list_partners(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
@@ -108,7 +85,7 @@ async def list_partners(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{partner_id}", response_model=dict)
+@router.get("/{partner_id}")
 async def get_partner(
         partner_id: str,
         user_id: str = Depends(get_current_user_id),
@@ -134,7 +111,7 @@ async def get_partner(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{partner_id}", response_model=dict)
+@router.put("/{partner_id}")
 async def update_partner(
         partner_id: str,
         partner: PartnerUpdate,
@@ -186,7 +163,7 @@ async def delete_partner(
 @router.post("/{partner_id}/gifts")
 async def add_gift_to_history(
         partner_id: str,
-        gift: GiftHistoryCreate,
+        gift: dict,  # Simplified for now
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
@@ -204,18 +181,10 @@ async def add_gift_to_history(
             raise HTTPException(status_code=404, detail="Partner not found")
 
         # Add gift to history
-        data = gift.dict()
-        data["partner_id"] = partner_id
-        data["user_id"] = user_id
+        gift["partner_id"] = partner_id
+        gift["user_id"] = user_id
 
-        response = db.table("partner_gift_history").insert(data).execute()
-
-        # Update partner's last_gift_date if purchased
-        if gift.purchased:
-            db.table("partners") \
-                .update({"last_gift_date": datetime.now().isoformat()}) \
-                .eq("id", partner_id) \
-                .execute()
+        response = db.table("partner_gift_history").insert(gift).execute()
 
         return response.data[0]
     except Exception as e:
