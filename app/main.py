@@ -3,6 +3,7 @@
 import os
 from typing import Optional
 from pathlib import Path
+from datetime import datetime
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,64 +26,50 @@ from app.dependencies import check_rate_limit_dependency
 from app.rate_limiter import record_token_usage
 from supabase import Client
 
-# Import admin router
+# Import routers
 from app.admin_api import router as admin_router
+from app.partners_api import router as partners_router
 
-# --------------------------------------------------
 # Configure logging
-# --------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------
-# App Setup (ONLY ONE INSTANCE!)
-# --------------------------------------------------
+# App Setup
 app = FastAPI(title="Gift AI Backend")
 
-# --------------------------------------------------
-# Mount static files FIRST (before routes)
-# --------------------------------------------------
+# Mount static files
 try:
-    # Static files are in app/static/
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-    logger.info(f"✓ Static files mounted from: {static_dir}")
+    logger.info("✓ Static files mounted from: %s" % static_dir)
 except Exception as e:
-    logger.warning(f"Could not mount static files: {str(e)}")
+    logger.warning("Could not mount static files: %s" % str(e))
 
-# --------------------------------------------------
-# Include admin router
-# --------------------------------------------------
+# Include routers
 app.include_router(admin_router)
+app.include_router(partners_router)
 
 
-# --------------------------------------------------
-# Startup: initialize database
-# --------------------------------------------------
+# Startup
 @app.on_event("startup")
 def startup():
     init_db()
 
 
-# --------------------------------------------------
-# API Key Protection (ADMIN ONLY)
-# --------------------------------------------------
+# API Key Protection
 def require_api_key(x_api_key: str = Header(None)):
     expected_key = os.getenv("BACKEND_API_KEY")
-
     if not expected_key or x_api_key != expected_key:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# --------------------------------------------------
-# CORS (Frontend Access)
-# --------------------------------------------------
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "https://web-production-314d8.up.railway.app",
-        "*"  # Allow all origins for development
+        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -90,69 +77,38 @@ app.add_middleware(
 )
 
 
-# --------------------------------------------------
-# Image Proxy Endpoints
-# --------------------------------------------------
+# Image Proxy
 @app.get("/proxy-image")
 async def proxy_image(url: str):
-    """
-    Proxy endpoint to fetch images and bypass CORS restrictions.
-    Usage: /proxy-image?url=https://m.media-amazon.com/...
-    """
-    logger.info(f"Proxying image request for: {url}")
-
+    logger.info("Proxying image request for: %s" % url)
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
-            # Add headers to mimic a browser request
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                 "Referer": "https://www.amazon.com/"
             }
-
             response = await client.get(url, headers=headers)
-
-            logger.info(f"Image fetch status: {response.status_code}")
 
             if response.status_code == 200:
                 content_type = response.headers.get("content-type", "image/jpeg")
-                logger.info(f"Successfully fetched image, content-type: {content_type}")
-
                 return Response(
                     content=response.content,
                     media_type=content_type,
                     headers={
-                        "Cache-Control": "public, max-age=86400",  # Cache for 24 hours
+                        "Cache-Control": "public, max-age=86400",
                         "Access-Control-Allow-Origin": "*"
                     }
                 )
             else:
-                logger.error(f"Failed to fetch image: Status {response.status_code}")
-                return Response(
-                    content=f"Failed to fetch image: {response.status_code}",
-                    status_code=response.status_code
-                )
-
-    except httpx.TimeoutException:
-        logger.error(f"Timeout fetching image: {url}")
-        return Response(content="Timeout fetching image", status_code=504)
+                return Response(content="Failed to fetch image: %d" % response.status_code,
+                                status_code=response.status_code)
     except Exception as e:
-        logger.error(f"Error fetching image: {str(e)}")
-        return Response(content=f"Error: {str(e)}", status_code=500)
+        logger.error("Error fetching image: %s" % str(e))
+        return Response(content="Error: %s" % str(e), status_code=500)
 
 
-@app.get("/test-proxy")
-async def test_proxy():
-    """Test the proxy with a known Amazon image"""
-    test_url = "https://m.media-amazon.com/images/I/71zK6H8F1TL._AC_SL1500_.jpg"
-    logger.info(f"Testing proxy with: {test_url}")
-    return await proxy_image(test_url)
-
-
-# --------------------------------------------------
-# Preferences Endpoint (Explicit User Input)
-# --------------------------------------------------
+# Preferences
 @app.post("/preferences")
 def save_user_preferences(preferences: PreferencesRequest):
     save_preferences(
@@ -163,9 +119,7 @@ def save_user_preferences(preferences: PreferencesRequest):
     return {"status": "saved"}
 
 
-# --------------------------------------------------
-# Feedback Endpoint
-# --------------------------------------------------
+# Feedback
 @app.post("/feedback")
 def submit_feedback(feedback: GiftFeedback):
     save_feedback(
@@ -173,42 +127,27 @@ def submit_feedback(feedback: GiftFeedback):
         gift_name=feedback.gift_name,
         liked=feedback.liked,
     )
-
-    # NOTE:
-    # Inferred preferences are NOT updated here yet
-    # This will be added once gift → category mapping exists
-
     return {"status": "feedback recorded"}
 
 
-# --------------------------------------------------
-# Recommendation Endpoint (PUBLIC)
-# --------------------------------------------------
+# Recommendation Endpoint (Updated with partner support)
 @app.get("/recommend")
 def recommend(
         query: str,
         user_id: Optional[str] = None,
+        partner_id: Optional[str] = None,
         max_price: Optional[int] = None,
         days_until_needed: Optional[int] = None,
         db: Client = Depends(get_db),
         ip_address: str = Depends(check_rate_limit_dependency)
 ):
-    logger.info(f"Recommendation request from IP: {ip_address}, query: {query}")
+    logger.info("Recommendation request: query=%s, partner_id=%s" % (query, partner_id))
 
-    # ---------------------------
-    # Load explicit preferences
-    # ---------------------------
+    # Load session preferences
     explicit = get_preferences(user_id) if user_id else None
     explicit = explicit or {"interests": [], "vibe": []}
-
-    # ---------------------------
-    # Load inferred preferences
-    # ---------------------------
     inferred = get_inferred(user_id) if user_id else {"interests": {}, "vibe": {}}
 
-    # ---------------------------
-    # Merge explicit + inferred
-    # ---------------------------
     merged_preferences = {
         "interests": (
                 explicit["interests"]
@@ -220,29 +159,62 @@ def recommend(
         ),
     }
 
-    # ---------------------------
-    # Retrieve gifts
-    # ---------------------------
+    # Load partner profile (persistent data - separate from session)
+    partner_profile = None
+    partner_gift_history = []
+    partner_context = None
+
+    if partner_id and user_id:
+        try:
+            # Get partner profile
+            partner_response = db.table('partners').select('*').eq('id', partner_id).eq('user_id',
+                                                                                        user_id).single().execute()
+            if partner_response.data:
+                partner_profile = partner_response.data
+                logger.info("Loaded partner profile: %s" % partner_profile.get('name'))
+
+                # Update search timestamp
+                db.table('partners').update({
+                    'last_gift_search_at': datetime.now().isoformat(),
+                    'gift_search_count': partner_profile.get('gift_search_count', 0) + 1
+                }).eq('id', partner_id).execute()
+
+                # Get purchased gift IDs
+                history_response = db.table('partner_gift_history').select('gift_id').eq('partner_id', partner_id).eq(
+                    'purchased', True).execute()
+                partner_gift_history = [item['gift_id'] for item in history_response.data if item.get('gift_id')]
+                logger.info("Excluding %d previously purchased gifts" % len(partner_gift_history))
+
+                # Build partner context for LLM
+                partner_context = {
+                    "name": partner_profile.get("name"),
+                    "interests": partner_profile.get("interests", []),
+                    "vibe": partner_profile.get("vibe", []),
+                    "personality": partner_profile.get("personality_traits", []),
+                }
+        except Exception as e:
+            logger.error("Failed to load partner profile: %s" % str(e))
+
+    # Retrieve gifts with clean separation
     gifts = retrieve_gifts(
         query=query,
         user_id=user_id,
         max_price=max_price,
         days_until_needed=days_until_needed,
         preferences=merged_preferences,
+        partner_profile=partner_profile,
+        partner_gift_history=partner_gift_history,
     )
 
-    # ---------------------------
-    # Generate response
-    # ---------------------------
+    # Generate response with partner context
     llm_response, tokens_used = generate_gift_response(
         query=query,
         gifts=gifts,
         preferences=merged_preferences,
+        partner_context=partner_context
     )
 
-    # ---------------------------
     # Record token usage
-    # ---------------------------
     try:
         record_token_usage(
             client=db,
@@ -251,267 +223,39 @@ def recommend(
             model="gpt-4o-mini",
             endpoint="/recommend"
         )
-        logger.info(f"Recorded {tokens_used} tokens for IP: {ip_address}")
+        logger.info("Recorded %d tokens for IP: %s" % (tokens_used, ip_address))
     except Exception as e:
-        logger.error(f"Failed to record token usage: {str(e)}")
-        # Don't fail the request if token recording fails
+        logger.error("Failed to record token usage: %s" % str(e))
 
     return llm_response
 
 
-# --------------------------------------------------
-# Admin Endpoint (Protected)
-# --------------------------------------------------
+# Admin endpoints
 @app.post("/admin/load-vectors", dependencies=[Depends(require_api_key)])
 def load_vectors():
     return {"status": "Vectors loaded"}
 
 
-# --------------------------------------------------
-# Admin Dashboard
-# --------------------------------------------------
 @app.get("/admin/products", response_class=HTMLResponse)
 async def admin_dashboard():
-    """Serve the admin product management dashboard"""
     try:
-        # Get path to admin.html in app/static/
         html_path = Path(__file__).parent / "static" / "admin.html"
-
-        logger.info(f"Loading admin dashboard from: {html_path}")
-
-        # Use UTF-8 encoding to handle emojis and special characters
         with open(html_path, "r", encoding="utf-8") as f:
             content = f.read()
-            logger.info("✓ Admin dashboard loaded successfully")
             return HTMLResponse(content=content)
-
-    except FileNotFoundError:
-        logger.error(f"Admin dashboard not found at: {html_path}")
-        return HTMLResponse(
-            content=f"""
-            <h1>Admin dashboard not found</h1>
-            <p>Expected location: {html_path}</p>
-            <p>Make sure app/static/admin.html exists</p>
-            """,
-            status_code=404
-        )
     except Exception as e:
-        logger.error(f"Error loading admin dashboard: {str(e)}")
-        return HTMLResponse(
-            content=f"<h1>Error loading admin page</h1><p>{str(e)}</p>",
-            status_code=500
-        )
-
-
-# --------------------------------------------------
-# Health Check
-# --------------------------------------------------
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/debug/gifts-simple")
-async def debug_gifts_simple():
-    """Simpler debug endpoint"""
-    try:
-        import os
-        from supabase import create_client
-
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_KEY")
-
-        if not url or not key:
-            return {"error": "Missing Supabase credentials"}
-
-        supabase = create_client(url, key)
-        response = supabase.table('gifts').select('*').limit(5).execute()
-
-        return {
-            "status": "ok",
-            "count": len(response.data) if response.data else 0,
-            "gifts": response.data
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
-
-
-@app.get("/debug/quick-test")
-async def quick_test():
-    """Quick test to see where retrieval fails"""
-    results = {}
-
-    # Step 1: Can we connect to database?
-    try:
-        from supabase import create_client
-        import os
-
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_KEY")  # ← Fixed
-
-        if not url or not key:
-            results["database_connection"] = f"❌ Missing credentials"
-            return results
-
-        db = create_client(url, key)  # ← Fixed
-        results["database_connection"] = "✅ OK"
-    except Exception as e:
-        results["database_connection"] = f"❌ FAILED: {str(e)}"
-        return results
-
-    # Step 2: Can we get gifts from Supabase?
-    try:
-        response = db.table('gifts').select('*').limit(5).execute()
-        results["database_query"] = f"✅ OK - Found {len(response.data)} gifts"
-        results["sample_gift_names"] = [g.get("name") for g in response.data]
-    except Exception as e:
-        results["database_query"] = f"❌ FAILED: {str(e)}"
-        return results
-
-    # Step 3: Can retrieval.py be imported?
-    try:
-        from app.retrieval import retrieve_gifts
-        results["import_retrieval"] = "✅ OK"
-    except Exception as e:
-        results["import_retrieval"] = f"❌ FAILED: {str(e)}"
-        return results
-
-    # Step 4: Can retrieve_gifts run?
-    try:
-        gifts = retrieve_gifts(query="test", k=10)
-        results["retrieve_gifts"] = f"✅ OK - Returned {len(gifts)} gifts"
-        if gifts:
-            results["first_gift"] = gifts[0].get("name", "NO NAME")
-        else:
-            results["first_gift"] = "No gifts returned!"
-    except Exception as e:
-        results["retrieve_gifts"] = f"❌ FAILED: {str(e)}"
-        import traceback
-        results["traceback"] = traceback.format_exc()
-
-    return results
-
-
-@app.get("/debug/full-pipeline")
-async def debug_full_pipeline(query: str = "coffee"):
-    """Debug the complete pipeline from retrieval to LLM"""
-    from app.retrieval import retrieve_gifts
-    from app.llm import generate_gift_response
-
-    logger.info("=== STARTING FULL PIPELINE DEBUG for query: " + query + " ===")
-
-    # Step 1: Retrieval
-    logger.info("Step 1: Calling retrieve_gifts...")
-    gifts = retrieve_gifts(
-        query=query,
-        user_id=None,
-        k=5,
-        max_price=None,
-        preferences={"interests": [], "vibe": []}
-    )
-
-    retrieval_results = []
-    for i, gift in enumerate(gifts, 1):
-        result = {
-            "rank": i,
-            "name": gift.get("name"),
-            "score": gift.get("score"),
-            "confidence": gift.get("confidence"),
-            "interests": gift.get("interests"),
-            "has_coffee": "coffee" in str(gift.get("interests")).lower() or "coffee" in gift.get("name", "").lower()
-        }
-        retrieval_results.append(result)
-        name_preview = gift.get("name", "")[:40]
-        score = gift.get("score")
-        conf = gift.get("confidence")
-        logger.info("  Rank %d: %s | Score: %s | Conf: %s" % (i, name_preview, score, conf))
-
-    # Step 2: LLM Processing
-    logger.info("Step 2: Calling generate_gift_response...")
-    llm_response, tokens = generate_gift_response(
-        query=query,
-        gifts=gifts,
-        preferences={"interests": [], "vibe": []}
-    )
-
-    llm_results = []
-    for i, gift in enumerate(llm_response.get("gifts", []), 1):
-        result = {
-            "rank": i,
-            "name": gift.get("name"),
-            "confidence": gift.get("confidence"),
-        }
-        llm_results.append(result)
-        name_preview = gift.get("name", "")[:40]
-        conf = gift.get("confidence")
-        logger.info("  Final Rank %d: %s | Conf: %s" % (i, name_preview, conf))
-
-    logger.info("=== PIPELINE DEBUG COMPLETE ===")
-
-    return {
-        "query": query,
-        "step_1_retrieval": {
-            "count": len(retrieval_results),
-            "gifts": retrieval_results
-        },
-        "step_2_llm": {
-            "count": len(llm_results),
-            "gifts": llm_results
-        },
-        "comparison": {
-            "order_preserved": [r["name"] for r in retrieval_results] == [l["name"] for l in llm_results],
-            "retrieval_order": [r["name"] for r in retrieval_results],
-            "llm_order": [l["name"] for l in llm_results]
-        }
-    }
-
-
-@app.get("/debug/retrieval-only")
-async def debug_retrieval_only(query: str = "coffee"):
-    """Test retrieval without LLM processing"""
-    from app.retrieval import retrieve_gifts
-
-    gifts = retrieve_gifts(
-        query=query,
-        user_id=None,
-        k=10,
-        max_price=None,
-        preferences={"interests": [], "vibe": []}
-    )
-
-    return {
-        "query": query,
-        "count": len(gifts),
-        "gifts": [
-            {
-                "name": g.get("name"),
-                "score": g.get("score"),
-                "confidence": g.get("confidence"),
-                "interests": g.get("interests"),
-                "has_coffee": "coffee" in str(g.get("interests")).lower() or "coffee" in g.get("name", "").lower()
-            }
-            for g in gifts
-        ]
-    }
+        logger.error("Error loading admin dashboard: %s" % str(e))
+        return HTMLResponse(content="Error loading admin page", status_code=500)
 
 
 @app.post("/admin/generate-embeddings")
 async def generate_embeddings_for_all_gifts():
-    """
-    Generate embeddings for all gifts that don't have one.
-    Run this once after adding the embedding column.
-    """
     from app.retrieval import get_supabase_client
     from app.embeddings import generate_embedding, create_gift_text_for_embedding, update_gift_embedding
     import traceback
 
     try:
         supabase = get_supabase_client()
-
-        # Get all gifts without embeddings
         response = supabase.table('gifts').select('*').is_('embedding', 'null').execute()
         gifts = response.data
 
@@ -522,28 +266,20 @@ async def generate_embeddings_for_all_gifts():
 
         for gift in gifts:
             try:
-                # Create text representation
                 text = create_gift_text_for_embedding(gift)
-
-                # Generate embedding
-                logger.info("Generating embedding for: " + gift.get('name', '')[:40])
+                logger.info("Generating embedding for: %s" % gift.get('name', '')[:40])
                 embedding = generate_embedding(text)
 
                 if embedding:
-                    # Save to database
                     if update_gift_embedding(gift['id'], embedding):
                         success_count += 1
-                        logger.info("✓ Saved embedding for: " + gift.get('name', '')[:40])
+                        logger.info("✓ Saved embedding for: %s" % gift.get('name', '')[:40])
                     else:
                         error_count += 1
-                        logger.error("✗ Failed to save embedding for: " + gift.get('name', '')[:40])
                 else:
                     error_count += 1
-                    logger.error("✗ Failed to generate embedding for: " + gift.get('name', '')[:40])
-
             except Exception as e:
-                logger.error("Error processing gift " + gift.get('id', '') + ": " + str(e))
-                logger.error(traceback.format_exc())
+                logger.error("Error processing gift %s: %s" % (gift.get('id', ''), str(e)))
                 error_count += 1
 
         return {
@@ -552,11 +288,12 @@ async def generate_embeddings_for_all_gifts():
             "success": success_count,
             "errors": error_count
         }
-
     except Exception as e:
-        logger.error("Error in generate_embeddings: " + str(e))
-        logger.error(traceback.format_exc())
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+        logger.error("Error in generate_embeddings: %s" % str(e))
+        return {"status": "error", "error": str(e)}
+
+
+# Health Check
+@app.get("/")
+def health():
+    return {"status": "ok"}
