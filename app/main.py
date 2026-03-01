@@ -125,21 +125,23 @@ def submit_feedback(feedback: GiftFeedback):
     )
     return {"status": "feedback recorded"}
 
+
 # Recommendation Endpoint (Updated with full context)
 @app.get("/recommend")
 def recommend(
-    query: str,
-    user_id: Optional[str] = None,
-    partner_id: Optional[str] = None,
-    max_price: Optional[int] = None,
-    days_until_needed: Optional[int] = None,
-    occasion: Optional[str] = None,  # NEW
-    relationship: Optional[str] = None,  # NEW
-    db: Client = Depends(get_db),
-    ip_address: str = Depends(check_rate_limit_dependency)
+        query: str,
+        user_id: Optional[str] = None,
+        partner_id: Optional[str] = None,
+        partner_name: Optional[str] = None,  # NEW: Accept name directly from quiz
+        max_price: Optional[int] = None,
+        days_until_needed: Optional[int] = None,
+        occasion: Optional[str] = None,
+        relationship: Optional[str] = None,
+        db: Client = Depends(get_db),
+        ip_address: str = Depends(check_rate_limit_dependency)
 ):
-    logger.info("Recommendation request: query=%s, partner_id=%s, occasion=%s, relationship=%s" % (
-        query, partner_id, occasion, relationship
+    logger.info("Recommendation request: query=%s, partner_id=%s, partner_name=%s, occasion=%s, relationship=%s" % (
+        query, partner_id, partner_name, occasion, relationship
     ))
 
     # Load session preferences
@@ -149,12 +151,12 @@ def recommend(
 
     merged_preferences = {
         "interests": (
-            explicit["interests"]
-            + [key for key, weight in inferred["interests"].items() for _ in range(weight)]
+                explicit["interests"]
+                + [key for key, weight in inferred["interests"].items() for _ in range(weight)]
         ),
         "vibe": (
-            explicit["vibe"]
-            + [key for key, weight in inferred["vibe"].items() for _ in range(weight)]
+                explicit["vibe"]
+                + [key for key, weight in inferred["vibe"].items() for _ in range(weight)]
         ),
     }
 
@@ -165,8 +167,9 @@ def recommend(
 
     if partner_id and user_id:
         try:
-            # Get partner profile
-            partner_response = db.table('partners').select('*').eq('id', partner_id).eq('user_id', user_id).single().execute()
+            # Get partner profile from database
+            partner_response = db.table('partners').select('*').eq('id', partner_id).eq('user_id',
+                                                                                        user_id).single().execute()
             if partner_response.data:
                 partner_profile = partner_response.data
                 logger.info("Loaded partner profile: %s" % partner_profile.get('name'))
@@ -178,7 +181,8 @@ def recommend(
                 }).eq('id', partner_id).execute()
 
                 # Get purchased gift IDs
-                history_response = db.table('partner_gift_history').select('gift_id').eq('partner_id', partner_id).eq('purchased', True).execute()
+                history_response = db.table('partner_gift_history').select('gift_id').eq('partner_id', partner_id).eq(
+                    'purchased', True).execute()
                 partner_gift_history = [item['gift_id'] for item in history_response.data if item.get('gift_id')]
                 logger.info("Excluding %d previously purchased gifts" % len(partner_gift_history))
 
@@ -191,6 +195,16 @@ def recommend(
                 }
         except Exception as e:
             logger.error("Failed to load partner profile: %s" % str(e))
+
+    # NEW: If no partner_id but we have a partner_name from the quiz, use it
+    if not partner_context and partner_name:
+        logger.info("Using partner name from query: %s" % partner_name)
+        partner_context = {
+            "name": partner_name,
+            "interests": [],
+            "vibe": [],
+            "personality": []
+        }
 
     # Retrieve gifts with clean separation
     gifts = retrieve_gifts(
@@ -216,8 +230,8 @@ def recommend(
         query=query,
         gifts=gifts,
         preferences=merged_preferences,
-        partner_context=partner_context,
-        session_context=session_context  # NEW
+        partner_context=partner_context,  # This now includes the name!
+        session_context=session_context
     )
 
     # Record token usage
