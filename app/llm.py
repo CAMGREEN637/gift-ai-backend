@@ -105,6 +105,11 @@ Description: %s
             desc
         )
 
+    # FIX: Build all the variables FIRST, then format the string
+    occ_display = occasion or "this special moment"
+    rel_display = relationship or "your connection"
+    name_display = recipient_name or possessive
+
     # Enhanced system prompt emphasizing uniqueness
     system_prompt = """
 You are an expert gift consultant helping someone choose a meaningful gift for %s.
@@ -148,7 +153,7 @@ CRITICAL INSTRUCTIONS FOR WRITING EXPLANATIONS:
    - Avoid corporate/salesy language
 
 7. ALREADY PURCHASED ITEMS
-   - If previously purchased, acknowledge it naturally: "Since %s loved this before, it's a safe bet - though you might also try [different angle]"
+   - If previously purchased, acknowledge it naturally
 
 FORBIDDEN PHRASES (do not use these repetitive templates):
 - "Perfect for [name] who loves..."
@@ -163,10 +168,10 @@ OUTPUT FORMAT: Valid JSON only.
 """ % (
         recipient_display,
         context_text,
-        recipient_name or possessive,
+        recipient_name or "the recipient's name",
         possessive,
-        occasion or "this special moment",
-        relationship or "your connection"
+        occ_display,
+        rel_display
     )
 
     user_prompt = """
@@ -180,11 +185,11 @@ Create explanations that are:
 
 JSON Format:
 {
-  "intro": "One warm, natural sentence mentioning %s and the occasion",
+  "intro": "One warm, natural sentence mentioning the recipient and the occasion",
   "gifts": [
     {
       "name": "exact gift name from the list",
-      "reason": "Unique 2-3 sentence explanation that uses %s and is COMPLETELY DIFFERENT from all other explanations"
+      "reason": "Unique 2-3 sentence explanation that is COMPLETELY DIFFERENT from all other explanations"
     }
   ]
 }
@@ -197,8 +202,6 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
         query,
         recipient_name or "the recipient",
         occasion or "special",
-        recipient_name or "them",
-        recipient_name or possessive,
         gift_context
     )
 
@@ -210,7 +213,7 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.7  # Higher temperature for more variety
+            temperature=0.7
         )
 
         tokens_used = response.usage.total_tokens if response.usage else 0
@@ -246,17 +249,16 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
                rel: "%s has been into %s lately - this fits right into that passion while being practical enough for everyday use. For %s, it hits the sweet spot between thoughtful and useful." % (
             name, interest, occ),
         lambda name, interest, occ,
-               rel: "This caught my eye because %s mentioned %s, and this is something that actually enhances that experience rather than just sitting on a shelf. It's the kind of gift that gets used and appreciated." % (
-            name, interest),
+               rel: "This caught my eye because of the %s connection, and this is something that actually enhances that experience rather than just sitting on a shelf. It's the kind of gift that gets used and appreciated." % interest,
         lambda name, interest, occ,
-               rel: "Knowing %s's taste in %s, this feels like something they'd pick out themselves - which is always the goal. It's personal without being over-the-top, especially for %s." % (
-            name, interest, occ),
+               rel: "Knowing their taste in %s, this feels like something they'd pick out themselves - which is always the goal. It's personal without being over-the-top, especially for %s." % (
+            interest, occ),
         lambda name, interest, occ,
-               rel: "This works because it connects to %s's interest in %s, but in a way that adds something new to it. Given it's for %s, it strikes the right balance between meaningful and practical." % (
-            name, interest, occ),
+               rel: "This works because it connects to %s, but in a way that adds something new to it. Given it's for %s, it strikes the right balance between meaningful and practical." % (
+            interest, occ),
         lambda name, interest, occ,
-               rel: "The quality here is noticeable, and %s will definitely pick up on that. It's not just about the %s angle - it's about getting something that feels considered and well-chosen for this %s." % (
-            name, interest, occ)
+               rel: "The quality here is noticeable, and they will definitely pick up on that. It's not just about the %s angle - it's about getting something that feels considered and well-chosen for this %s." % (
+            interest, occ)
     ]
 
     for idx, original in enumerate(gifts):
