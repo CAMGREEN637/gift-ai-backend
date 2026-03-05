@@ -1,352 +1,203 @@
-# app/amazon_scraper.py
-# Amazon product scraper for admin product management
-
-import re
-import logging
-from typing import Optional, Dict
 import httpx
+import re
 from bs4 import BeautifulSoup
-from app.admin_models import AmazonProductResponse
+from typing import Optional, Dict
+import logging
+import random
+import time
 
 logger = logging.getLogger(__name__)
 
-# User agent to mimic a real browser
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "max-age=0",
-}
+# Realistic browser user agents that rotate
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
 
 
-def extract_asin(url: str) -> Optional[str]:
-    """
-    Extract ASIN from Amazon URL.
-
-    Patterns:
-    - /dp/ASIN
-    - /gp/product/ASIN
-    - /product/ASIN
-    """
-    patterns = [
-        r'/dp/([A-Z0-9]{10})',
-        r'/gp/product/([A-Z0-9]{10})',
-        r'/product/([A-Z0-9]{10})',
-        r'[?&]asin=([A-Z0-9]{10})',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, url, re.IGNORECASE)
-        if match:
-            return match.group(1)
-
+def extract_asin_from_url(url: str) -> Optional[str]:
+    """Extract ASIN from Amazon URL."""
+    # Pattern: /dp/{ASIN} or /gp/product/{ASIN}
+    match = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})', url)
+    if match:
+        return match.group(1)
     return None
 
 
-def clean_price(price_text: str) -> Optional[float]:
-    """Extract numeric price from price text."""
-    if not price_text:
-        return None
-
-    # Remove currency symbols and extract number
-    price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
-    if price_match:
-        try:
-            return float(price_match.group(0))
-        except ValueError:
-            return None
-    return None
-
-
-def clean_rating(rating_text: str) -> Optional[float]:
-    """Extract numeric rating from rating text."""
-    if not rating_text:
-        return None
-
-    # Extract number before "out of" or similar
-    rating_match = re.search(r'([\d.]+)\s*out of', rating_text, re.IGNORECASE)
-    if rating_match:
-        try:
-            return float(rating_match.group(1))
-        except ValueError:
-            return None
-
-    # Try extracting any decimal number
-    rating_match = re.search(r'(\d+\.?\d*)', rating_text)
-    if rating_match:
-        try:
-            rating = float(rating_match.group(1))
-            if 0 <= rating <= 5:
-                return rating
-        except ValueError:
-            pass
-
-    return None
+def get_random_headers():
+    """Get realistic browser headers"""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    }
 
 
-def clean_review_count(review_text: str) -> Optional[int]:
-    """Extract review count from review text."""
-    if not review_text:
-        return None
-
-    # Remove commas and extract number
-    review_text_clean = review_text.replace(',', '').replace('.', '')
-    number_match = re.search(r'(\d+)', review_text_clean)
-    if number_match:
-        try:
-            return int(number_match.group(1))
-        except ValueError:
-            return None
-
-    return None
-
-
-async def scrape_amazon_product(url: str) -> AmazonProductResponse:
+async def scrape_amazon_product(url: str) -> Dict:
     """
-    Scrape Amazon product details from URL.
-
-    Args:
-        url: Amazon product URL
-
-    Returns:
-        AmazonProductResponse with extracted details
-
-    Raises:
-        ValueError: If ASIN cannot be extracted or product not found
-        httpx.HTTPError: If request fails
+    Scrape product details from Amazon URL with improved anti-blocking.
     """
-    # Extract ASIN
-    asin = extract_asin(url)
-    if not asin:
-        raise ValueError("Could not extract ASIN from URL. Please provide a valid Amazon product URL.")
 
-    logger.info(f"Scraping Amazon product: ASIN={asin}")
+    # Validate URL
+    if not url or "amazon.com" not in url.lower():
+        raise ValueError("Invalid Amazon URL")
 
-    # Construct clean Amazon URL
-    product_url = f"https://www.amazon.com/dp/{asin}"
+    # Add small random delay to appear more human
+    time.sleep(random.uniform(0.5, 1.5))
 
     try:
-        async with httpx.AsyncClient(headers=HEADERS, timeout=15.0, follow_redirects=True) as client:
-            response = await client.get(product_url)
-            response.raise_for_status()
+        async with httpx.AsyncClient(
+                timeout=15.0,
+                follow_redirects=True,
+                http2=True
+        ) as client:
+
+            logger.info("Fetching URL: %s" % url)
+            response = await client.get(url, headers=get_random_headers())
+
+            if response.status_code == 503:
+                raise ValueError("Amazon is temporarily blocking requests. Try again in a few minutes.")
 
             if response.status_code != 200:
-                raise ValueError(f"Failed to fetch product page: HTTP {response.status_code}")
+                raise ValueError("Failed to fetch page (HTTP %d)" % response.status_code)
 
             html = response.text
 
-        # Parse HTML
-        soup = BeautifulSoup(html, 'html.parser')
+            if "api-services-support@amazon.com" in html or "Enter the characters you see below" in html:
+                raise ValueError(
+                    "Amazon CAPTCHA detected. Please try again in a few minutes or use a different network.")
 
-        # Extract product name
-        name = None
-        name_selectors = [
-            {'id': 'productTitle'},
-            {'class': 'product-title'},
-            {'id': 'title'},
-        ]
-        for selector in name_selectors:
-            element = soup.find(**selector)
-            if element:
-                name = element.get_text(strip=True)
-                break
+            soup = BeautifulSoup(html, "html.parser")
+            product_data = {}
 
-        if not name:
-            raise ValueError("Could not extract product name. The page might be blocked or product unavailable.")
+            # --- Product Name ---
+            name = None
+            name_selectors = [
+                {"id": "productTitle"},
+                {"id": "title"},
+                {"class": "product-title-word-break"},
+            ]
 
-        # Extract price
-        price = None
-        price_selectors = [
-            {'class': 'a-price-whole'},
-            {'class': 'a-offscreen'},
-            {'id': 'priceblock_ourprice'},
-            {'id': 'priceblock_dealprice'},
-            {'class': 'a-price'},
-        ]
-        for selector in price_selectors:
-            element = soup.find(**selector)
-            if element:
-                price_text = element.get_text(strip=True)
-                price = clean_price(price_text)
-                if price:
-                    break
+            for selector in name_selectors:
+                element = soup.find(**selector)
+                if element:
+                    name = element.get_text().strip()
+                    if name: break
 
-        # Extract image URL
-        image_url = None
-        image_selectors = [
-            {'id': 'landingImage'},
-            {'id': 'imgBlkFront'},
-            {'class': 'a-dynamic-image'},
-        ]
-        for selector in image_selectors:
-            element = soup.find('img', **selector)
-            if element:
-                image_url = element.get('src') or element.get('data-old-hires') or element.get('data-a-dynamic-image')
-                if image_url:
-                    # Extract first URL if it's a JSON string
-                    if image_url.startswith('{'):
-                        import json
-                        try:
-                            image_data = json.loads(image_url)
-                            image_url = list(image_data.keys())[0]
-                        except:
-                            pass
-                    break
+            if not name:
+                raise ValueError("Could not extract product name.")
 
-        # Extract brand
-        brand = None
-        brand_selectors = [
-            {'id': 'bylineInfo'},
-            {'class': 'po-brand'},
-            {'id': 'brand'},
-        ]
-        for selector in brand_selectors:
-            element = soup.find(**selector)
-            if element:
-                brand_text = element.get_text(strip=True)
-                # Clean up "Visit the X Store" or "Brand: X"
-                brand_text = re.sub(r'Visit the (.+?) Store', r'\1', brand_text, flags=re.IGNORECASE)
-                brand_text = re.sub(r'Brand:\s*', '', brand_text, flags=re.IGNORECASE)
-                brand = brand_text
-                break
+            product_data["name"] = name
 
-        # Extract description
-        description = None
-        desc_selectors = [
-            {'id': 'feature-bullets'},
-            {'id': 'productDescription'},
-            {'class': 'a-section a-spacing-medium a-spacing-top-small'},
-        ]
-        for selector in desc_selectors:
-            element = soup.find(**selector)
-            if element:
-                # Get text from list items if available
-                items = element.find_all('li')
-                if items:
-                    description = ' '.join([item.get_text(strip=True) for item in items[:5]])  # First 5 bullet points
-                else:
-                    description = element.get_text(strip=True)[:500]  # Limit to 500 chars
-                break
+            # --- Price ---
+            price = 0.0
+            price_patterns = [{"class": "a-price-whole"}, {"class": "a-offscreen"}]
 
-        # Extract rating
-        rating = None
-        rating_selectors = [
-            {'class': 'a-icon-alt'},
-            {'id': 'acrPopover'},
-            {'class': 'a-star'},
-        ]
-        for selector in rating_selectors:
-            element = soup.find(**selector)
-            if element:
-                rating_text = element.get_text(strip=True)
-                rating = clean_rating(rating_text)
-                if rating:
-                    break
-
-        # Extract review count
-        review_count = None
-        review_selectors = [
-            {'id': 'acrCustomerReviewText'},
-            {'class': 'a-size-base'},
-        ]
-        for selector in review_selectors:
-            element = soup.find(**selector)
-            if element:
-                review_text = element.get_text(strip=True)
-                if 'rating' in review_text.lower():
-                    review_count = clean_review_count(review_text)
-                    if review_count:
+            for pattern in price_patterns:
+                element = soup.find(**pattern)
+                if element:
+                    price_text = element.get_text().strip()
+                    match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+                    if match:
+                        price = float(match.group())
                         break
+            product_data["price"] = price
 
-        # Check stock status
-        in_stock = True
-        stock_selectors = [
-            {'id': 'availability'},
-            {'class': 'a-size-medium a-color-price'},
-        ]
-        for selector in stock_selectors:
-            element = soup.find(**selector)
-            if element:
-                stock_text = element.get_text(strip=True).lower()
-                if any(word in stock_text for word in ['unavailable', 'out of stock', 'currently unavailable']):
-                    in_stock = False
+            # --- Description ---
+            description = None
+            desc_selectors = [{"id": "feature-bullets"}, {"id": "productDescription"}]
+
+            for selector in desc_selectors:
+                element = soup.find(**selector)
+                if element:
+                    description = re.sub(r'\s+', ' ', element.get_text().strip())[:500]
                     break
+            product_data["description"] = description or "No description available"
 
-        logger.info(f"Successfully scraped product: {name[:50]}...")
+            # --- Image URL ---
+            img_element = soup.find("img", {"id": "landingImage"}) or soup.find("img", {"class": "a-dynamic-image"})
+            product_data["image_url"] = img_element.get("src") if img_element else None
 
-        return AmazonProductResponse(
-            name=name,
-            description=description,
-            price=price,
-            currency="USD",  # Amazon.com defaults to USD
-            image_url=image_url,
-            brand=brand,
-            rating=rating,
-            review_count=review_count or 0,
-            in_stock=in_stock,
-            asin=asin,
-            link=product_url
-        )
+            # --- Brand ---
+            brand = None
+            brand_element = soup.find("a", {"id": "bylineInfo"})
+            if brand_element:
+                brand_text = brand_element.get_text().strip()
+                brand = re.sub(r'^(Visit the |Brand: )', '', brand_text).replace(' Store', '').strip()
+            product_data["brand"] = brand
 
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error scraping Amazon: {str(e)}")
-        raise ValueError(f"Failed to fetch Amazon page: {str(e)}")
+            # --- NEW: ASIN Extraction ---
+            asin = extract_asin_from_url(url)
+            product_data["asin"] = asin
+            if asin:
+                logger.info("✓ Found ASIN: %s" % asin)
+
+            # --- Rating & Reviews ---
+            rating = None
+            rating_element = soup.find("span", {"class": "a-icon-alt"})
+            if rating_element:
+                match = re.search(r'([\d.]+)\s*out of\s*5', rating_element.get_text())
+                if match: rating = float(match.group(1))
+            product_data["rating"] = rating
+
+            review_count = None
+            review_element = soup.find("span", {"id": "acrCustomerReviewText"})
+            if review_element:
+                match = re.search(r'([\d,]+)\s*ratings?', review_element.get_text())
+                if match: review_count = int(match.group(1).replace(',', ''))
+            product_data["review_count"] = review_count
+
+            # Metadata and Defaults
+            product_data.update({
+                "link": url,
+                "source": "amazon",
+                "currency": "USD",
+                "in_stock": True,
+                "categories": [],
+                "interests": [],
+                "occasions": [],
+                "vibe": [],
+                "personality_traits": [],
+                "recipient": {}
+            })
+
+            return product_data
+
     except Exception as e:
-        logger.error(f"Error scraping Amazon: {str(e)}")
-        raise ValueError(f"Failed to scrape product details: {str(e)}")
+        logger.error("Scraping error: %s" % str(e))
+        raise ValueError("Failed to scrape product: %s" % str(e))
 
 
-def get_quality_indicators(rating: Optional[float], review_count: Optional[int], in_stock: bool) -> Dict[str, str]:
-    """
-    Get quality indicators for a product.
-
-    Returns:
-        Dict with rating_status, reviews_status, stock_status, overall_quality
-    """
-    # Rating status
-    if rating is None:
-        rating_status = "warning"
-    elif rating >= 4.0:
-        rating_status = "excellent"
-    elif rating >= 3.0:
-        rating_status = "warning"
-    else:
-        rating_status = "poor"
-
-    # Review count status
-    review_count = review_count or 0
-    if review_count >= 50:
-        reviews_status = "excellent"
-    elif review_count >= 10:
-        reviews_status = "warning"
-    else:
-        reviews_status = "poor"
-
-    # Stock status
-    stock_status = "in_stock" if in_stock else "out_of_stock"
-
-    # Overall quality (worst of rating and reviews)
-    if not in_stock:
-        overall_quality = "poor"
-    elif rating_status == "poor" or reviews_status == "poor":
-        overall_quality = "poor"
-    elif rating_status == "warning" or reviews_status == "warning":
-        overall_quality = "warning"
-    elif rating_status == "excellent" and reviews_status == "excellent":
-        overall_quality = "excellent"
-    else:
-        overall_quality = "good"
-
-    return {
-        "rating_status": rating_status,
-        "reviews_status": reviews_status,
-        "stock_status": stock_status,
-        "overall_quality": overall_quality
+def get_quality_indicators(rating: Optional[float], review_count: Optional[int], in_stock: bool) -> Dict:
+    """Analyze product quality based on rating and reviews."""
+    indicators = {
+        "overall_quality": "unknown",
+        "rating_score": "N/A",
+        "review_score": "N/A",
+        "stock_status": "in_stock" if in_stock else "out_of_stock",
+        "recommended": False
     }
+
+    if rating is not None:
+        indicators["rating_score"] = "excellent" if rating >= 4.5 else "good" if rating >= 4.0 else "average"
+
+    if review_count is not None:
+        indicators["review_score"] = "highly_reviewed" if review_count >= 1000 else "well_reviewed"
+
+    if rating and review_count:
+        if rating >= 4.0 and review_count >= 100:
+            indicators["overall_quality"] = "excellent"
+            indicators["recommended"] = True
+
+    return indicators
