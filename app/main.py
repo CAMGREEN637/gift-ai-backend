@@ -29,6 +29,7 @@ from supabase import Client
 # Import routers
 from app.admin_api import router as admin_router
 from app.partners_api import router as partners_router
+from app.user_profile_api import router as user_profile_router  # NEW
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,17 +49,21 @@ except Exception as e:
 # Include routers
 app.include_router(admin_router)
 app.include_router(partners_router)
+app.include_router(user_profile_router)  # NEW
+
 
 # Startup
 @app.on_event("startup")
 def startup():
     init_db()
 
+
 # API Key Protection
 def require_api_key(x_api_key: str = Header(None)):
     expected_key = os.getenv("BACKEND_API_KEY")
     if not expected_key or x_api_key != expected_key:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # CORS
 app.add_middleware(
@@ -72,6 +77,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # Image Proxy
 @app.get("/proxy-image")
@@ -105,6 +111,7 @@ async def proxy_image(url: str):
         logger.error("Error fetching image: %s" % str(e))
         return Response(content="Error: %s" % str(e), status_code=500)
 
+
 # Preferences
 @app.post("/preferences")
 def save_user_preferences(preferences: PreferencesRequest):
@@ -114,6 +121,7 @@ def save_user_preferences(preferences: PreferencesRequest):
         vibe=preferences.vibe,
     )
     return {"status": "saved"}
+
 
 # Feedback
 @app.post("/feedback")
@@ -126,13 +134,13 @@ def submit_feedback(feedback: GiftFeedback):
     return {"status": "feedback recorded"}
 
 
-# Recommendation Endpoint (Updated with full context)
+# Recommendation Endpoint
 @app.get("/recommend")
 def recommend(
         query: str,
         user_id: Optional[str] = None,
         partner_id: Optional[str] = None,
-        partner_name: Optional[str] = None,  # NEW: Accept name directly from quiz
+        partner_name: Optional[str] = None,
         max_price: Optional[int] = None,
         days_until_needed: Optional[int] = None,
         occasion: Optional[str] = None,
@@ -160,43 +168,39 @@ def recommend(
         ),
     }
 
-    # Load partner profile (persistent data - separate from session)
+    # Load recipient profile from user_profiles
+    recipient_profile = None
+    partner_context = None
+
+    # Kept for compatibility with the retrieve_gifts call below
     partner_profile = None
     partner_gift_history = []
-    partner_context = None
 
     if partner_id and user_id:
         try:
-            # Get partner profile from database
-            partner_response = db.table('partners').select('*').eq('id', partner_id).eq('user_id',
-                                                                                        user_id).single().execute()
-            if partner_response.data:
-                partner_profile = partner_response.data
-                logger.info("Loaded partner profile: %s" % partner_profile.get('name'))
+            # Get user's profile
+            profile_response = db.table('user_profiles').select('saved_recipients').eq('user_id',
+                                                                                       user_id).single().execute()
 
-                # Update search timestamp
-                db.table('partners').update({
-                    'last_gift_search_at': datetime.now().isoformat(),
-                    'gift_search_count': partner_profile.get('gift_search_count', 0) + 1
-                }).eq('id', partner_id).execute()
+            if profile_response.data:
+                saved_recipients = profile_response.data.get('saved_recipients', [])
+                # Find the specific recipient
+                recipient = next((r for r in saved_recipients if r.get('id') == partner_id), None)
 
-                # Get purchased gift IDs
-                history_response = db.table('partner_gift_history').select('gift_id').eq('partner_id', partner_id).eq(
-                    'purchased', True).execute()
-                partner_gift_history = [item['gift_id'] for item in history_response.data if item.get('gift_id')]
-                logger.info("Excluding %d previously purchased gifts" % len(partner_gift_history))
-
-                # Build partner context for LLM
-                partner_context = {
-                    "name": partner_profile.get("name"),
-                    "interests": partner_profile.get("interests", []),
-                    "vibe": partner_profile.get("vibe", []),
-                    "personality": partner_profile.get("personality_traits", []),
-                }
+                if recipient:
+                    logger.info("Loaded recipient: %s" % recipient.get('name'))
+                    recipient_profile = recipient
+                    partner_profile = recipient  # Pass this to retrieve_gifts
+                    partner_context = {
+                        "name": recipient.get("name"),
+                        "interests": recipient.get("interests", []),
+                        "vibe": recipient.get("vibe", []),
+                        "personality": recipient.get("personality_traits", []),
+                    }
         except Exception as e:
-            logger.error("Failed to load partner profile: %s" % str(e))
+            logger.error("Failed to load recipient: %s" % str(e))
 
-    # NEW: If no partner_id but we have a partner_name from the quiz, use it
+    # If no partner_id but we have a partner_name from the quiz, use it
     if not partner_context and partner_name:
         logger.info("Using partner name from query: %s" % partner_name)
         partner_context = {
@@ -230,7 +234,7 @@ def recommend(
         query=query,
         gifts=gifts,
         preferences=merged_preferences,
-        partner_context=partner_context,  # This now includes the name!
+        partner_context=partner_context,
         session_context=session_context
     )
 
@@ -249,10 +253,12 @@ def recommend(
 
     return llm_response
 
+
 # Admin endpoints
 @app.post("/admin/load-vectors", dependencies=[Depends(require_api_key)])
 def load_vectors():
     return {"status": "Vectors loaded"}
+
 
 @app.get("/admin/products", response_class=HTMLResponse)
 async def admin_dashboard():
@@ -264,6 +270,7 @@ async def admin_dashboard():
     except Exception as e:
         logger.error("Error loading admin dashboard: %s" % str(e))
         return HTMLResponse(content="Error loading admin page", status_code=500)
+
 
 @app.post("/admin/generate-embeddings")
 async def generate_embeddings_for_all_gifts():
@@ -308,6 +315,7 @@ async def generate_embeddings_for_all_gifts():
     except Exception as e:
         logger.error("Error in generate_embeddings: %s" % str(e))
         return {"status": "error", "error": str(e)}
+
 
 # Health Check
 @app.get("/")
