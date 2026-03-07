@@ -75,6 +75,53 @@ def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
         logger.error("Invalid token: %s" % str(e))
         raise HTTPException(status_code=401, detail="Invalid token")
 
+def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
+    """Extract user ID from Supabase JWT token"""
+
+    # Debug: Check if header exists
+    if not authorization:
+        logger.error("❌ No Authorization header provided")
+        raise HTTPException(status_code=401, detail="Not authenticated - No auth header")
+
+    if not authorization.startswith("Bearer "):
+        logger.error("❌ Invalid Authorization format: %s" % authorization[:20])
+        raise HTTPException(status_code=401, detail="Not authenticated - Invalid format")
+
+    token = authorization.replace("Bearer ", "")
+    logger.info("🔑 Received token (first 20 chars): %s..." % token[:20])
+
+    try:
+        jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+
+        if not jwt_secret:
+            logger.error("❌ SUPABASE_JWT_SECRET not set in environment!")
+            raise HTTPException(status_code=500, detail="Server configuration error")
+
+        logger.info("🔑 JWT Secret loaded (first 10 chars): %s..." % jwt_secret[:10])
+
+        # Decode JWT token
+        payload = jwt.decode(
+            token,
+            jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated"
+        )
+
+        user_id = payload.get("sub")
+
+        if not user_id:
+            logger.error("❌ Token valid but no user ID in payload")
+            raise HTTPException(status_code=401, detail="Invalid token - no user ID")
+
+        logger.info("✅ Authenticated user: %s" % user_id)
+        return user_id
+
+    except jwt.ExpiredSignatureError:
+        logger.error("❌ Token expired")
+        raise HTTPException(status_code=401, detail="Token expired - please sign in again")
+    except jwt.InvalidTokenError as e:
+        logger.error("❌ Invalid token: %s" % str(e))
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # Endpoints
 @router.get("/")
@@ -310,3 +357,12 @@ async def delete_recipient(
     except Exception as e:
         logger.error("Error deleting recipient: %s" % str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/test-auth")
+async def test_auth(user_id: str = Depends(get_current_user_id)):
+    """Test endpoint to verify authentication"""
+    return {
+        "status": "authenticated",
+        "user_id": user_id,
+        "message": "Auth is working!"
+    }
