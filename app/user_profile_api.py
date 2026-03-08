@@ -10,6 +10,8 @@ import os
 import time
 from app.database import get_db
 from supabase import Client
+import uuid
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +96,10 @@ async def get_profile(
         response = db.table("user_profiles") \
             .select("*") \
             .eq("user_id", user_id) \
-            .single() \
             .execute()
 
-        if not response.data:
-            # Create profile if doesn't exist
+        # If no profile, create one
+        if not response.data or len(response.data) == 0:
             new_profile = {
                 "user_id": user_id,
                 "saved_recipients": []
@@ -106,7 +107,7 @@ async def get_profile(
             response = db.table("user_profiles").insert(new_profile).execute()
             return response.data[0]
 
-        return response.data
+        return response.data[0]
 
     except Exception as e:
         logger.error("Error getting profile: %s" % str(e))
@@ -120,16 +121,18 @@ async def get_recipients(
 ):
     """Get all saved recipients"""
     try:
+        # Don't use .single() - it throws error if no rows
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
-            .single() \
             .execute()
 
-        if not response.data:
+        # Check if profile exists
+        if not response.data or len(response.data) == 0:
+            logger.info("No profile found for user %s, returning empty list" % user_id)
             return []
 
-        recipients = response.data.get("saved_recipients", [])
+        recipients = response.data[0].get("saved_recipients", [])
         logger.info("Loaded %d recipients for user %s" % (len(recipients), user_id))
         return recipients
 
@@ -146,18 +149,49 @@ async def add_recipient(
 ):
     """Add a new gift recipient"""
     try:
-        # Get current profile
+        # Get current profile (don't use .single())
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
-            .single() \
             .execute()
 
-        recipients = response.data.get("saved_recipients", []) if response.data else []
+        # If no profile exists, create one
+        if not response.data or len(response.data) == 0:
+            logger.info("Creating new profile for user %s" % user_id)
+
+            # Generate recipient ID
+            recipient_id = str(uuid.uuid4())
+
+            # Build recipient dict
+            recipient_dict = recipient.dict(exclude_none=True)
+            recipient_dict["id"] = recipient_id
+
+            # Convert dates
+            if recipient_dict.get("birthday"):
+                recipient_dict["birthday"] = str(recipient_dict["birthday"])
+            if recipient_dict.get("anniversary"):
+                recipient_dict["anniversary"] = str(recipient_dict["anniversary"])
+            if recipient_dict.get("lastGiftDate"):
+                recipient_dict["lastGiftDate"] = str(recipient_dict["lastGiftDate"])
+
+            # Add timestamp
+            recipient_dict["createdAt"] = datetime.now().isoformat()
+
+            # Create new profile with this recipient
+            new_profile = {
+                "user_id": user_id,
+                "saved_recipients": [recipient_dict]
+            }
+
+            db.table("user_profiles").insert(new_profile).execute()
+            logger.info("Created new profile and added recipient: %s" % recipient.name)
+            return recipient_dict
+
+        # Profile exists, add to it
+        recipients = response.data[0].get("saved_recipients", [])
 
         # Generate ID if not provided
         if not recipient.id:
-            import uuid
             recipient.id = str(uuid.uuid4())
 
         # Convert to dict
@@ -172,7 +206,6 @@ async def add_recipient(
             recipient_dict["lastGiftDate"] = str(recipient_dict["lastGiftDate"])
 
         # Add timestamp
-        from datetime import datetime
         recipient_dict["createdAt"] = datetime.now().isoformat()
 
         # Check if recipient with same name exists
@@ -213,10 +246,12 @@ async def get_recipient(
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
-            .single() \
             .execute()
 
-        recipients = response.data.get("saved_recipients", []) if response.data else []
+        if not response.data or len(response.data) == 0:
+             raise HTTPException(status_code=404, detail="Recipient not found")
+
+        recipients = response.data[0].get("saved_recipients", [])
 
         recipient = next((r for r in recipients if r.get("id") == recipient_id), None)
 
@@ -244,10 +279,12 @@ async def update_recipient(
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
-            .single() \
             .execute()
 
-        recipients = response.data.get("saved_recipients", []) if response.data else []
+        if not response.data or len(response.data) == 0:
+             raise HTTPException(status_code=404, detail="Recipient not found")
+
+        recipients = response.data[0].get("saved_recipients", [])
 
         index = next((i for i, r in enumerate(recipients) if r.get("id") == recipient_id), None)
 
@@ -289,10 +326,12 @@ async def delete_recipient(
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
-            .single() \
             .execute()
 
-        recipients = response.data.get("saved_recipients", []) if response.data else []
+        if not response.data or len(response.data) == 0:
+             raise HTTPException(status_code=404, detail="Recipient not found")
+
+        recipients = response.data[0].get("saved_recipients", [])
 
         new_recipients = [r for r in recipients if r.get("id") != recipient_id]
 
