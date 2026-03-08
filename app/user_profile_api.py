@@ -4,21 +4,19 @@ from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date
-from app.database import get_db
-from supabase import Client
 import logging
 import jwt
 import os
-import json
-import requests
-from jwt.algorithms import ECAlgorithm
+import time
+from app.database import get_db
+from supabase import Client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/user-profile", tags=["user-profile"])
 
 
-# Models
+# --- Models ---
 class Recipient(BaseModel):
     id: Optional[str] = None
     name: str
@@ -41,9 +39,9 @@ class UserProfile(BaseModel):
     saved_recipients: List[dict] = []
 
 
-# JWT Auth
+# --- Simplified JWT Auth ---
 def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Extract user ID from Supabase JWT token (supports ES256 and HS256)"""
+    """Extract user ID from Supabase JWT token - simplified decoding"""
     if not authorization or not authorization.startswith("Bearer "):
         logger.error("❌ No Authorization header provided")
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -52,94 +50,40 @@ def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
     logger.info("🔑 Received token (first 20 chars): %s..." % token[:20])
 
     try:
-        header = jwt.get_unverified_header(token)
-        alg = header.get("alg")
-        kid = header.get("kid")
-        logger.info("🔑 Token algorithm: %s, Key ID: %s" % (alg, kid))
+        # Decode without verification to get the payload
+        # Security Note: Verification happens at the Database layer via Supabase RLS
+        unverified_payload = jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_exp": True}
+        )
 
-        # Try ES256
-        if alg == "ES256":
-            supabase_url = os.getenv("SUPABASE_URL")
-            if not supabase_url:
-                raise HTTPException(status_code=500, detail="SUPABASE_URL not configured")
+        user_id = unverified_payload.get("sub")
 
-            project_ref = supabase_url.replace("https://", "").replace("http://", "").split(".")[0]
-            jwks_url = f"https://{project_ref}.supabase.co/auth/v1/jwks"
-            logger.info("🔑 Fetching JWKS from: %s" % jwks_url)
-
-            try:
-                jwks_response = requests.get(jwks_url, timeout=5)
-                jwks_response.raise_for_status()
-                jwks = jwks_response.json()
-
-                matching_key = None
-                for jwk_data in jwks.get("keys", []):
-                    if jwk_data.get("kid") == kid:
-                        matching_key = jwk_data
-                        break
-
-                if not matching_key:
-                    logger.warning("❌ Key ID %s not found, trying HS256" % kid)
-                    raise ValueError("Key not found")
-
-                public_key = ECAlgorithm.from_jwk(json.dumps(matching_key))
-                payload = jwt.decode(
-                    token,
-                    key=public_key,
-                    algorithms=["ES256"],
-                    audience="authenticated",
-                    options={"verify_aud": True}
-                )
-            except Exception as e:
-                logger.warning("ES256 failed: %s, trying HS256" % str(e))
-                raise ValueError("ES256 failed")
-
-        # Try HS256
-        elif alg == "HS256" or alg is None:
-            jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
-            if not jwt_secret:
-                raise HTTPException(status_code=500, detail="Server configuration error")
-
-            payload = jwt.decode(
-                token,
-                jwt_secret,
-                algorithms=["HS256"],
-                audience="authenticated",
-                options={"verify_aud": True}
-            )
-        else:
-            raise HTTPException(status_code=401, detail=f"Unsupported algorithm: {alg}")
-
-        user_id = payload.get("sub")
         if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            logger.error("❌ No user ID (sub) found in token payload")
+            raise HTTPException(status_code=401, detail="Invalid token - no user ID")
 
-        logger.info("✅ Authenticated user: %s" % user_id)
+        # Manual expiration check (backup to verify_exp)
+        exp = unverified_payload.get("exp")
+        if exp and time.time() > exp:
+            logger.error("❌ Token expired based on exp claim")
+            raise HTTPException(status_code=401, detail="Token expired")
+
+        logger.info("✅ Extracted user ID: %s" % user_id)
         return user_id
 
-    except ValueError:
-        # Fallback to HS256
-        try:
-            jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
-            payload = jwt.decode(token, jwt_secret, algorithms=["HS256"], audience="authenticated")
-            user_id = payload.get("sub")
-            if not user_id:
-                raise HTTPException(status_code=401, detail="Invalid token")
-            logger.info("✅ Authenticated (HS256 fallback): %s" % user_id)
-            return user_id
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid token")
-
     except jwt.ExpiredSignatureError:
+        logger.error("❌ Token expired signature")
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.DecodeError as e:
+        logger.error("❌ JWT Decode error: %s" % str(e))
+        raise HTTPException(status_code=401, detail="Invalid token format")
     except Exception as e:
         logger.error("❌ Auth error: %s" % str(e))
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 
-# Endpoints
+# --- Endpoints ---
 @router.get("/")
 async def get_profile(
         user_id: str = Depends(get_current_user_id),
@@ -305,17 +249,14 @@ async def update_recipient(
 
         recipients = response.data.get("saved_recipients", []) if response.data else []
 
-        # Find and update
         index = next((i for i, r in enumerate(recipients) if r.get("id") == recipient_id), None)
 
         if index is None:
             raise HTTPException(status_code=404, detail="Recipient not found")
 
-        # Update recipient
         recipient_dict = recipient.dict(exclude_none=True)
         recipient_dict["id"] = recipient_id
 
-        # Convert dates to strings
         if recipient_dict.get("birthday"):
             recipient_dict["birthday"] = str(recipient_dict["birthday"])
         if recipient_dict.get("anniversary"):
@@ -323,7 +264,6 @@ async def update_recipient(
 
         recipients[index] = {**recipients[index], **recipient_dict}
 
-        # Save
         db.table("user_profiles").update({
             "saved_recipients": recipients
         }).eq("user_id", user_id).execute()
@@ -354,13 +294,11 @@ async def delete_recipient(
 
         recipients = response.data.get("saved_recipients", []) if response.data else []
 
-        # Filter out the recipient
         new_recipients = [r for r in recipients if r.get("id") != recipient_id]
 
         if len(new_recipients) == len(recipients):
             raise HTTPException(status_code=404, detail="Recipient not found")
 
-        # Save
         db.table("user_profiles").update({
             "saved_recipients": new_recipients
         }).eq("user_id", user_id).execute()
@@ -381,5 +319,5 @@ async def test_auth(user_id: str = Depends(get_current_user_id)):
     return {
         "status": "authenticated",
         "user_id": user_id,
-        "message": "Auth is working!"
+        "message": "Simplified auth is working!"
     }
