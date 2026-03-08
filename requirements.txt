@@ -8,3 +8,6 @@ python-dotenv
 httpx
 beautifulsoup4
 lxml
+cryptography
+requests
+PyJWT[crypto]

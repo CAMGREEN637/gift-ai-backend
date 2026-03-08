@@ -10,13 +10,14 @@ import logging
 import jwt
 import os
 import json
+import requests  # Added for JWKS fetching
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/user-profile", tags=["user-profile"])
 
 
-# Models
+# --- Models ---
 class Recipient(BaseModel):
     id: Optional[str] = None
     name: str
@@ -39,72 +40,54 @@ class UserProfile(BaseModel):
     saved_recipients: List[dict] = []
 
 
-# JWT Auth
+# --- JWT Auth (Updated for ES256 & JWKS) ---
 def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Extract user ID from Supabase JWT token"""
+    """Extract user ID from Supabase JWT token (supports ES256)"""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    token = authorization.replace("Bearer ", "")
-
-    try:
-        jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
-
-        if not jwt_secret:
-            logger.error("SUPABASE_JWT_SECRET not set!")
-            raise HTTPException(status_code=500, detail="Server configuration error")
-
-        payload = jwt.decode(
-            token,
-            jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated"
-        )
-
-        user_id = payload.get("sub")
-
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-
-        logger.info("Authenticated user: %s" % user_id)
-        return user_id
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError as e:
-        logger.error("Invalid token: %s" % str(e))
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Extract user ID from Supabase JWT token"""
-
-    # Debug: Check if header exists
-    if not authorization:
         logger.error("❌ No Authorization header provided")
         raise HTTPException(status_code=401, detail="Not authenticated - No auth header")
-
-    if not authorization.startswith("Bearer "):
-        logger.error("❌ Invalid Authorization format: %s" % authorization[:20])
-        raise HTTPException(status_code=401, detail="Not authenticated - Invalid format")
 
     token = authorization.replace("Bearer ", "")
     logger.info("🔑 Received token (first 20 chars): %s..." % token[:20])
 
     try:
-        jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+        # Get Supabase project ref from URL
+        supabase_url = os.getenv("SUPABASE_URL")
+        if not supabase_url:
+            raise HTTPException(status_code=500, detail="SUPABASE_URL not configured")
 
-        if not jwt_secret:
-            logger.error("❌ SUPABASE_JWT_SECRET not set in environment!")
-            raise HTTPException(status_code=500, detail="Server configuration error")
+        # Extract project reference (e.g., "eimtwdqiwhkgbfmtonkt")
+        project_ref = supabase_url.replace("https://", "").split(".")[0]
 
-        logger.info("🔑 JWT Secret loaded (first 10 chars): %s..." % jwt_secret[:10])
+        # Fetch JWKS (JSON Web Key Set) from Supabase
+        jwks_url = f"https://{project_ref}.supabase.co/auth/v1/jwks"
+        jwks_response = requests.get(jwks_url)
+        jwks = jwks_response.json()
 
-        # Decode JWT token
+        # Decode header to get key ID
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+
+        if not kid:
+            raise HTTPException(status_code=401, detail="Invalid token - no key ID")
+
+        # Find the matching key
+        key = None
+        for jwk in jwks.get("keys", []):
+            if jwk.get("kid") == kid:
+                key = jwt.algorithms.ECAlgorithm.from_jwk(jwk)
+                break
+
+        if not key:
+            raise HTTPException(status_code=401, detail="Invalid token - key not found")
+
+        # Decode and verify token
         payload = jwt.decode(
             token,
-            jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated"
+            key=key,
+            algorithms=["ES256"],  # New algorithm
+            audience="authenticated",
+            options={"verify_aud": True}
         )
 
         user_id = payload.get("sub")
@@ -122,8 +105,12 @@ def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
     except jwt.InvalidTokenError as e:
         logger.error("❌ Invalid token: %s" % str(e))
         raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        logger.error("❌ Auth error: %s" % str(e))
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
-# Endpoints
+
+# --- Endpoints ---
 @router.get("/")
 async def get_profile(
         user_id: str = Depends(get_current_user_id),
