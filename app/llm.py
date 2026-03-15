@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from typing import List, Dict, Optional
 import json
 import logging
+import traceback
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -105,7 +106,7 @@ Description: %s
             desc
         )
 
-    # FIX: Build all the variables FIRST, then format the string
+    # Build all the variables FIRST, then format the string
     occ_display = occasion or "this special moment"
     rel_display = relationship or "your connection"
     name_display = recipient_name or possessive
@@ -217,16 +218,19 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
         )
 
         tokens_used = response.usage.total_tokens if response.usage else 0
-        content = response.choices[0].message.content
+        content = response.choices[0].message.content.strip()
 
+        # Robust stripping of markdown formatting
         if content.startswith("```json"):
-            content = content.replace("```json", "").replace("```", "").strip()
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
 
         parsed = json.loads(content)
 
     except Exception as e:
         logger.error("LLM Generation or Parsing failed: %s" % str(e))
-        import traceback
         logger.error(traceback.format_exc())
         parsed = {
             "intro": "Here are some thoughtful gifts for %s:" % recipient_display,
@@ -236,12 +240,17 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
 
     # Re-sync with retrieval order and create diverse fallbacks
     enriched = []
-    llm_results = {}
+    llm_results_by_index = {}
+    llm_results_by_name = {}
 
-    for g in parsed.get("gifts", []):
-        name = g.get("name", "").lower()
+    # Build mappings using both index AND name for bulletproof matching
+    for i, g in enumerate(parsed.get("gifts", [])):
         reason = g.get("reason", "")
-        llm_results[name] = reason
+        name = g.get("name", "").strip().lower()
+
+        llm_results_by_index[i] = reason
+        if name:
+            llm_results_by_name[name] = reason
 
     # Fallback templates with high variety
     fallback_templates = [
@@ -262,7 +271,12 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
     ]
 
     for idx, original in enumerate(gifts):
-        reason = llm_results.get(original["name"].lower())
+        orig_name = original.get("name", "").strip().lower()
+
+        # Try finding the reason by exact index first, then fall back to name matching
+        reason = llm_results_by_index.get(idx)
+        if not reason:
+            reason = llm_results_by_name.get(orig_name)
 
         if not reason:
             # Create diverse fallback
@@ -279,8 +293,8 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
             )
 
         enriched.append({
-            "name": original["name"],
-            "price": original["price"],
+            "name": original.get("name", ""),
+            "price": original.get("price", 0),
             "confidence": original.get("confidence", 0),
             "description": original.get("description", ""),
             "image_url": original.get("image_url", ""),
