@@ -13,6 +13,53 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logger = logging.getLogger(__name__)
 
 
+def generate_display_name(product_name: str, description: str = "") -> str:
+    """
+    Generate a clean, short display name from Amazon's SEO-filled product name
+    """
+    prompt = f"""You are a product naming expert. Convert this Amazon product name into a clean, retail-ready display name.
+
+Amazon Product Name: {product_name}
+
+Rules:
+1. Maximum 6 words
+2. Keep the core product type and key feature
+3. Remove SEO filler, marketing hype, and brand names (unless it's a well-known brand like Apple, Nike, etc.)
+4. Keep important specs (size, capacity, material) if relevant
+5. Make it sound natural, not robotic
+6. Capitalize like a proper product title
+
+Examples:
+- "Insulated Stainless Steel Water Bottle, 32oz, Leak Proof, BPA Free, Hot & Cold, Double Wall Vacuum..." → "32oz Insulated Water Bottle"
+- "Premium Wireless Bluetooth Headphones with Noise Cancelling, 30 Hour Battery, Comfortable Over-Ear..." → "Noise Cancelling Wireless Headphones"
+- "Personalized Custom Engraved Photo Frame, Wooden Picture Frame, Holds 4x6 Photos, Perfect Gift..." → "Personalized Wooden Photo Frame"
+
+Return ONLY the clean display name, nothing else."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=20
+        )
+
+        display_name = response.choices[0].message.content.strip()
+        display_name = display_name.strip('"').strip("'")
+
+        words = display_name.split()
+        if len(words) > 6:
+            display_name = " ".join(words[:6])
+
+        logger.info(f"✅ Generated display name: '{display_name}'")
+        return display_name
+
+    except Exception as e:
+        logger.error(f"❌ Error generating display name: {e}")
+        words = product_name.split()[:6]
+        return " ".join(words)
+
+
 def generate_gift_response(
         query: str,
         gifts: List[Dict],
@@ -22,7 +69,6 @@ def generate_gift_response(
 ) -> tuple[Dict, int]:
     """
     Generates personalized gift recommendations with rich, non-repetitive context.
-    Each explanation must be genuinely unique - no template filling.
     """
 
     if not gifts:
@@ -32,18 +78,15 @@ def generate_gift_response(
             "gifts": []
         }, 0
 
-    # Extract rich context
     recipient_name = partner_context.get("name") if partner_context else None
     partner_interests = partner_context.get("interests", []) if partner_context else []
     partner_vibe = partner_context.get("vibe", []) if partner_context else []
     partner_personality = partner_context.get("personality", []) if partner_context else []
 
-    # Session context
     relationship = session_context.get("relationship") if session_context else None
     occasion = session_context.get("occasion") if session_context else None
     budget = session_context.get("budget") if session_context else None
 
-    # Build recipient display name
     if recipient_name:
         recipient_display = recipient_name
         possessive = "%s's" % recipient_name
@@ -51,7 +94,6 @@ def generate_gift_response(
         recipient_display = "your %s" % relationship if relationship else "them"
         possessive = "their"
 
-    # Build comprehensive context text
     context_text = """
 RECIPIENT: %s
 RELATIONSHIP: %s
@@ -72,139 +114,50 @@ RECIPIENT PROFILE:
         ", ".join(partner_personality[:3]) if partner_personality else "Not specified"
     )
 
-    # Build detailed gift context
     gift_context = ""
     for i, gift in enumerate(gifts, 1):
         reasons = ", ".join(gift.get('ranking_reasons', []))
         name = gift.get('name', '')
         conf = gift.get('confidence', 0) * 100
         desc = gift.get('description', '')[:200]
-        already_purchased = gift.get('already_purchased', False)
-        interests_match = gift.get('interests', [])
-        categories = gift.get('categories', [])
         price = gift.get('price', 0)
 
         gift_context += """
-GIFT #%d:%s
+GIFT #%d:
 Name: %s
 Price: $%.2f
 Confidence: %.0f%%
-Categories: %s
-Matches These Interests: %s
 Why It Ranked High: %s
 Description: %s
 ---
-""" % (
-            i,
-            " [PREVIOUSLY PURCHASED]" if already_purchased else "",
-            name,
-            price,
-            conf,
-            ", ".join(categories[:3]) if categories else "general",
-            ", ".join(interests_match[:3]) if interests_match else "broad appeal",
-            reasons,
-            desc
-        )
+""" % (i, name, price, conf, reasons, desc)
 
-    # Build all the variables FIRST, then format the string
     occ_display = occasion or "this special moment"
     rel_display = relationship or "your connection"
-    name_display = recipient_name or possessive
 
-    # Enhanced system prompt emphasizing uniqueness
     system_prompt = """
 You are an expert gift consultant helping someone choose a meaningful gift for %s.
-
 %s
-
-CRITICAL INSTRUCTIONS FOR WRITING EXPLANATIONS:
-
-1. UNIQUENESS IS MANDATORY
-   - Each gift explanation must be COMPLETELY DIFFERENT from the others
-   - Never use the same sentence structure twice
-   - Vary your approach: sometimes focus on the occasion, sometimes the relationship, sometimes the specific feature of the gift
-   - Use different vocabulary and phrasing for each explanation
-
-2. USE THE RECIPIENT'S NAME
-   - Always use "%s" (or "%s" when possessive) in EVERY explanation
-   - Never say "them" or "the recipient"
-
-3. CONNECT TO CONTEXT
-   - Weave in the occasion (%s) naturally - but do it differently each time
-   - Reference the relationship (%s) meaningfully - with variety
-   - Connect to specific interests when relevant - but change how you frame it
-
-4. VARY YOUR ANGLES
-   For different gifts, try different approaches:
-   - Gift 1: Focus on emotional impact
-   - Gift 2: Focus on practical use
-   - Gift 3: Focus on shared memories or experiences
-   - Gift 4: Focus on quality/craftsmanship
-   - Gift 5: Focus on surprise factor or uniqueness
-
-5. BE SPECIFIC TO THE ACTUAL GIFT
-   - Don't just say "this matches their interests"
-   - Explain HOW and WHY this specific item works
-   - Reference actual features or benefits from the description
-
-6. TONE GUIDELINES
-   - Warm and reassuring (help the buyer feel confident)
-   - Personal and conversational
-   - 2-3 sentences per explanation
-   - Avoid corporate/salesy language
-
-7. ALREADY PURCHASED ITEMS
-   - If previously purchased, acknowledge it naturally
-
-FORBIDDEN PHRASES (do not use these repetitive templates):
-- "Perfect for [name] who loves..."
-- "This shows you really know..."
-- "A great choice for..."
-- "[Name] will love this because..."
-- "Shows you pay attention..."
-
-Instead, write naturally as if explaining to a friend why each specific gift makes sense.
-
-OUTPUT FORMAT: Valid JSON only.
-""" % (
-        recipient_display,
-        context_text,
-        recipient_name or "the recipient's name",
-        possessive,
-        occ_display,
-        rel_display
-    )
+1. UNIQUENESS IS MANDATORY: Each explanation must be completely different.
+2. USE THE RECIPIENT'S NAME: Always use "%s" in every explanation.
+3. OUTPUT FORMAT: Valid JSON only.
+""" % (recipient_display, context_text, recipient_name or "the recipient's name")
 
     user_prompt = """
 User's search: "%s"
-
-Create explanations that are:
-1. Genuinely unique for each gift (no repeated structures)
-2. Specific to what each gift actually is and does
-3. Personal to %s and the %s occasion
-4. Varied in approach and tone
-
 JSON Format:
 {
   "intro": "One warm, natural sentence mentioning the recipient and the occasion",
   "gifts": [
     {
       "name": "exact gift name from the list",
-      "reason": "Unique 2-3 sentence explanation that is COMPLETELY DIFFERENT from all other explanations"
+      "reason": "Unique 2-3 sentence explanation"
     }
   ]
 }
-
-Gifts to explain (in this order):
+Gifts:
 %s
-
-Remember: Each explanation must feel like it was written fresh, not filled from a template. Vary sentence structure, vocabulary, and approach.
-""" % (
-        query,
-        recipient_name or "the recipient",
-        occasion or "special",
-        gift_context
-    )
+""" % (query, gift_context)
 
     try:
         response = client.chat.completions.create(
@@ -219,101 +172,39 @@ Remember: Each explanation must feel like it was written fresh, not filled from 
 
         tokens_used = response.usage.total_tokens if response.usage else 0
         content = response.choices[0].message.content.strip()
-
-        # Robust stripping of markdown formatting
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-
         parsed = json.loads(content)
 
     except Exception as e:
-        logger.error("LLM Generation or Parsing failed: %s" % str(e))
-        logger.error(traceback.format_exc())
-        parsed = {
-            "intro": "Here are some thoughtful gifts for %s:" % recipient_display,
-            "gifts": []
-        }
+        logger.error("LLM Generation failed: %s" % str(e))
+        parsed = {"intro": "Here are some gifts for %s:" % recipient_display, "gifts": []}
         tokens_used = 0
 
-    # Re-sync with retrieval order and create diverse fallbacks
     enriched = []
-    llm_results_by_index = {}
-    llm_results_by_name = {}
-
-    # Build mappings using both index AND name for bulletproof matching
-    for i, g in enumerate(parsed.get("gifts", [])):
-        reason = g.get("reason", "")
-        name = g.get("name", "").strip().lower()
-
-        llm_results_by_index[i] = reason
-        if name:
-            llm_results_by_name[name] = reason
-
-    # Fallback templates with high variety
-    fallback_templates = [
-        lambda name, interest, occ,
-               rel: "%s has been into %s lately - this fits right into that passion while being practical enough for everyday use. For %s, it hits the sweet spot between thoughtful and useful." % (
-            name, interest, occ),
-        lambda name, interest, occ,
-               rel: "This caught my eye because of the %s connection, and this is something that actually enhances that experience rather than just sitting on a shelf. It's the kind of gift that gets used and appreciated." % interest,
-        lambda name, interest, occ,
-               rel: "Knowing their taste in %s, this feels like something they'd pick out themselves - which is always the goal. It's personal without being over-the-top, especially for %s." % (
-            interest, occ),
-        lambda name, interest, occ,
-               rel: "This works because it connects to %s, but in a way that adds something new to it. Given it's for %s, it strikes the right balance between meaningful and practical." % (
-            interest, occ),
-        lambda name, interest, occ,
-               rel: "The quality here is noticeable, and they will definitely pick up on that. It's not just about the %s angle - it's about getting something that feels considered and well-chosen for this %s." % (
-            interest, occ)
-    ]
+    llm_results_by_name = {g.get("name", "").lower(): g.get("reason", "") for g in parsed.get("gifts", [])}
 
     for idx, original in enumerate(gifts):
-        orig_name = original.get("name", "").strip().lower()
+        orig_name = original.get("name", "").lower()
+        reason = llm_results_by_name.get(orig_name, "This is a thoughtful match for their current interests.")
 
-        # Try finding the reason by exact index first, then fall back to name matching
-        reason = llm_results_by_index.get(idx)
-        if not reason:
-            reason = llm_results_by_name.get(orig_name)
-
-        if not reason:
-            # Create diverse fallback
-            interests = original.get('interests', [])
-            interest_text = interests[0] if interests else "what they enjoy"
-
-            # Rotate through different fallback templates
-            template_func = fallback_templates[idx % len(fallback_templates)]
-            reason = template_func(
-                recipient_name or "They",
-                interest_text,
-                occasion or "this occasion",
-                relationship or "your relationship"
-            )
+        # Ensure we have a clean display name for the frontend
+        display_name = original.get("display_name")
+        if not display_name:
+            display_name = generate_display_name(original.get("name", ""), original.get("description", ""))
 
         enriched.append({
             "name": original.get("name", ""),
+            "display_name": display_name,
             "price": original.get("price", 0),
             "confidence": original.get("confidence", 0),
             "description": original.get("description", ""),
             "image_url": original.get("image_url", ""),
-            "product_url": original.get("link", "") or original.get("product_url", ""),
-            "ranking_reasons": original.get("ranking_reasons", []),
+            "product_url": original.get("product_url", "") or original.get("link", ""),
             "reason": reason,
+            "ranking_reasons": original.get("ranking_reasons", []),
             "already_purchased": original.get("already_purchased", False),
             "shipping_min_days": original.get("shipping_min_days"),
             "shipping_max_days": original.get("shipping_max_days"),
             "is_prime_eligible": original.get("is_prime_eligible"),
         })
 
-    intro = parsed.get("intro", "Here are some thoughtful gifts for %s:" % recipient_display)
-
-    logger.info("Generated %d unique explanations for %s (%s, %s)" % (
-        len(enriched),
-        recipient_name or "recipient",
-        occasion or "no occasion",
-        relationship or "no relationship"
-    ))
-
-    return {"intro": intro, "gifts": enriched}, tokens_used
+    return {"intro": parsed.get("intro", ""), "gifts": enriched}, tokens_used
