@@ -221,6 +221,13 @@ def recommend(
         partner_gift_history=partner_gift_history,
     )
 
+    # --- CONFIDENCE THRESHOLD FILTER ---
+    # Only keep gifts that have a match confidence of 80% or higher (0.8+)
+    original_count = len(gifts)
+    gifts = [g for g in gifts if g.get("confidence", 0) >= 0.8]
+    if original_count != len(gifts):
+        logger.info(f"Filtered out {original_count - len(gifts)} gifts below the 80% confidence threshold.")
+
     # Build session context for LLM
     session_context = {
         "occasion": occasion,
