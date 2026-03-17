@@ -188,6 +188,12 @@ def retrieve_gifts(
         raw_gifts = response.data or []
         logger.info("Retrieved %d candidates from vector search" % len(raw_gifts))
 
+        # ✅ DEBUG: Log if display_name is coming from database
+        if raw_gifts:
+            sample = raw_gifts[0]
+            logger.info("Sample gift fields: %s" % list(sample.keys()))
+            logger.info("Sample display_name: '%s'" % sample.get('display_name', 'NOT FOUND'))
+
     except Exception as e:
         logger.error("Vector search error: %s" % str(e))
         logger.error(traceback.format_exc())
@@ -196,8 +202,13 @@ def retrieve_gifts(
     scored = []
 
     for g in raw_gifts:
-        # --- NEW: Support display_name ---
-        g['display_name'] = g.get('display_name') or g.get('name', 'Unknown Gift')
+        # ✅ FIX: Ensure display_name is set properly
+        # If database returns display_name, use it; otherwise fall back to name
+        if 'display_name' not in g or not g['display_name']:
+            g['display_name'] = g.get('name', 'Unknown Gift')
+
+        # ✅ DEBUG: Log what we're using
+        logger.debug("Gift: %s | Display: %s" % (g.get('name', '')[:50], g.get('display_name', '')[:50]))
 
         # Normalize fields
         g["interests"] = normalize_list(g.get("interests"))
@@ -266,5 +277,11 @@ def retrieve_gifts(
 
     if max_price is not None:
         final_results = [g for g in final_results if g.get("price", 0) <= max_price]
+
+    # ✅ FINAL CHECK: Log what we're returning
+    logger.info("Returning %d gifts. First gift display_name: '%s'" % (
+        len(final_results),
+        final_results[0].get('display_name', 'NOT SET') if final_results else 'NO RESULTS'
+    ))
 
     return final_results
