@@ -29,12 +29,15 @@ GENERIC_TOKENS = {
 }
 
 VECTOR_MATCH_THRESHOLD = 0.15
-VECTOR_WEIGHT = 100
-INTENT_WEIGHT = 15
+
+# Rebalanced weights for better discovery
+VECTOR_WEIGHT = 60
+INTENT_WEIGHT = 25
 SESSION_WEIGHT = 5
 PROFILE_WEIGHT = 3
+PRICE_WEIGHT = 20
 
-DIVERSITY_PENALTY = 20
+DIVERSITY_PENALTY = 15
 NOVELTY_BOOST = 10
 MAX_CATEGORY_DOMINANCE = 3
 
@@ -67,20 +70,17 @@ def extract_meaningful_intent_tokens(query: str) -> Set[str]:
 
 
 def normalize_jsonb_to_list(value):
-    """Convert JSONB field to Python list of strings"""
+    """Safely converts Supabase JSONB or string fields into Python lists."""
     if value is None:
         return []
     if isinstance(value, list):
-        # Already a list
         return [str(v).strip().lower() for v in value if v]
     if isinstance(value, str):
-        # Try to parse as JSON
         try:
             parsed = json.loads(value)
             if isinstance(parsed, list):
                 return [str(v).strip().lower() for v in parsed if v]
         except:
-            # Not JSON, treat as comma-separated
             return [v.strip().lower() for v in value.split(",") if v.strip()]
     return []
 
@@ -94,6 +94,35 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
 
 
 # --------------------------------------------------
+# PRICE SCORING (SOFT BIAS)
+# --------------------------------------------------
+
+def compute_price_score(price: float, max_price: Optional[int]) -> float:
+    if not max_price or not price:
+        return 0
+
+    ratio = price / max_price
+
+    # Boost if near top of range (best value/quality match)
+    if 0.7 <= ratio <= 1.0:
+        return PRICE_WEIGHT * ratio
+
+    # Mid-range boost
+    if 0.4 <= ratio < 0.7:
+        return PRICE_WEIGHT * (ratio * 0.6)
+
+    # Small boost for budget-friendly items
+    if ratio < 0.4:
+        return PRICE_WEIGHT * 0.1
+
+    # Slight penalty if over max (soft filtering)
+    if ratio > 1.0:
+        return -5
+
+    return 0
+
+
+# --------------------------------------------------
 # SCORING
 # --------------------------------------------------
 
@@ -101,11 +130,11 @@ def compute_enhanced_score(
         gift: Dict,
         meaningful_intent_tokens: Set[str],
         preferences: Dict,
-        user_id: Optional[str],
+        feedback_history: List[Dict],
         partner_profile: Optional[Dict],
         partner_gift_history: List[str]
 ):
-    # ✅ FIX: Safely cast to string and handle None values to prevent + TypeError
+    # Safety: Coerce None values to empty strings/lists to prevent concatenation errors
     gift_text = (
             str(gift.get("name") or "") + " " +
             str(gift.get("description") or "") + " " +
@@ -131,14 +160,12 @@ def compute_enhanced_score(
                 len(gift_vibe & profile_vibe) * (PROFILE_WEIGHT * 0.7)
         )
 
-    history_penalty = -50 if gift.get("id") in partner_gift_history else 0
+    history_penalty = -40 if gift.get("id") in partner_gift_history else 0
 
     feedback_score = 0
-    if user_id:
-        history = get_feedback(user_id)
-        for entry in history:
-            if entry["gift_name"] == gift["name"]:
-                feedback_score += 10 if entry["liked"] else -20
+    for entry in feedback_history:
+        if entry.get("gift_name") == gift.get("name"):
+            feedback_score += 10 if entry.get("liked") else -15
 
     total_boost = intent_score + session_score + profile_score + history_penalty + feedback_score
 
@@ -150,14 +177,14 @@ def compute_enhanced_score(
     }
 
 
-def compute_confidence(vector_similarity: float, intent_match_count: int):
-    if intent_match_count >= 1 and vector_similarity >= 0.75:
-        return 0.92
-    if intent_match_count >= 1 and vector_similarity >= 0.65:
-        return 0.87
-    if intent_match_count >= 1:
-        return 0.85
-    return min(vector_similarity, 0.84)
+def compute_confidence(vector_similarity: float, intent_match_count: int, price_score: float):
+    base = vector_similarity
+    base += min(intent_match_count * 0.05, 0.15)
+    base += min(price_score / 100, 0.08)
+
+    # Clamp to realistic range for UI display
+    base = max(0.6, min(base, 0.96))
+    return round(base, 2)
 
 
 # --------------------------------------------------
@@ -175,16 +202,24 @@ def retrieve_gifts(
         partner_gift_history: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
-    Retrieve gifts with SOFT filtering and display_name support.
+    Main entry point for fetching and ranking gift recommendations.
     """
-
     preferences = normalize_preferences(preferences)
     meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
     partner_gift_history = partner_gift_history or []
 
+    # Optimize: Fetch feedback history once to avoid N+1 queries in the loop
+    user_feedback = []
+    if user_id:
+        try:
+            user_feedback = get_feedback(user_id)
+        except Exception as e:
+            logger.error(f"Failed to fetch user feedback: {e}")
+
     try:
         supabase = get_supabase_client()
         embedding = generate_embedding(query)
+
         if not embedding:
             logger.error("Embedding generation failed")
             return []
@@ -194,68 +229,81 @@ def retrieve_gifts(
             {
                 "query_embedding": embedding,
                 "match_threshold": VECTOR_MATCH_THRESHOLD,
-                "match_count": 50
+                "match_count": 80  # Fetch more than k to allow for diversity/price filtering
             }
         ).execute()
 
         raw_gifts = response.data or []
-        logger.info("Retrieved %d candidates from vector search" % len(raw_gifts))
+        logger.info(f"Retrieved {len(raw_gifts)} candidates from vector search")
 
     except Exception as e:
-        logger.error("Vector search error: %s" % str(e))
+        logger.error(f"Vector search error: {e}")
         logger.error(traceback.format_exc())
         return []
 
     scored = []
 
     for g in raw_gifts:
-        # ✅ Ensure display_name is set
-        if 'display_name' not in g or not g['display_name']:
-            g['display_name'] = g.get('name', 'Unknown Gift')
+        # Field Normalization
+        if not g.get("display_name"):
+            g["display_name"] = g.get("name", "Unknown Gift")
 
-        # ✅ Convert JSONB fields to Python lists
-        g["interests"] = normalize_jsonb_to_list(g.get("interests"))
-        g["categories"] = normalize_jsonb_to_list(g.get("categories"))
-        g["vibe"] = normalize_jsonb_to_list(g.get("vibe"))
-        g["occasions"] = normalize_jsonb_to_list(g.get("occasions"))
-        g["personality_traits"] = normalize_jsonb_to_list(g.get("personality_traits"))
+        for field in ["interests", "categories", "vibe", "occasions", "personality_traits"]:
+            g[field] = normalize_jsonb_to_list(g.get(field))
 
-        # ✅ Map 'link' to 'product_url' for frontend compatibility
         g["product_url"] = g.get("link")
 
+        # Scoring Logic
         vec_sim = g.get("similarity", 0)
         vector_score = vec_sim * VECTOR_WEIGHT
 
         score_data = compute_enhanced_score(
             g, meaningful_intent_tokens, preferences,
-            user_id, partner_profile, partner_gift_history
+            user_feedback, partner_profile, partner_gift_history
         )
 
+        price_score = compute_price_score(g.get("price", 0), max_price)
         novelty_score = NOVELTY_BOOST if g.get("id") not in partner_gift_history else 0
 
+        # Delivery logic
         on_time_bonus = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
             shipping_max = g.get("shipping_max_days", 8)
             if shipping_max <= days_until_needed:
-                on_time_bonus = 50
+                on_time_bonus = 40
                 delivery_status = "on_time"
             elif shipping_max <= days_until_needed + 3:
-                on_time_bonus = 20
+                on_time_bonus = 15
                 delivery_status = "tight"
             else:
                 delivery_status = "late"
 
-        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus
-        confidence = compute_confidence(vec_sim, score_data["intent_match_count"])
+        final_score = (
+                vector_score +
+                score_data["total_boost"] +
+                novelty_score +
+                on_time_bonus +
+                price_score
+        )
 
+        confidence = compute_confidence(
+            vec_sim,
+            score_data["intent_match_count"],
+            price_score
+        )
+
+        # Build ranking reasons for the frontend UI
         reasons = []
         if score_data["matched_intent"]:
             reasons.append("Matches: " + ", ".join(score_data["matched_intent"][:2]))
-        if len(set(g["interests"]) & set(preferences.get("interests", []))) > 0:
+        if set(g["interests"]) & set(preferences.get("interests", [])):
             reasons.append("Fits interests")
         if delivery_status == "on_time":
             reasons.append("Arrives on time")
+        if price_score > 10:
+            reasons.append("Great value in budget")
+
         if not reasons:
             reasons.append("Good match")
 
@@ -268,29 +316,35 @@ def retrieve_gifts(
         })
         scored.append(g)
 
-    # Diversity Pass
+    # --------------------------------------------------
+    # DIVERSITY PASS
+    # --------------------------------------------------
     scored.sort(key=lambda x: x["score"], reverse=True)
+
     category_counter = defaultdict(int)
     for gift in scored:
-        categories = gift.get("categories", [])
-        for cat in categories:
+        for cat in gift.get("categories", []):
             if category_counter[cat] >= MAX_CATEGORY_DOMINANCE:
                 gift["score"] -= DIVERSITY_PENALTY
                 break
             category_counter[cat] += 1
 
-    # Final Sort and Filter
+    # --------------------------------------------------
+    # FINAL FILTER & SORT
+    # --------------------------------------------------
     scored.sort(key=lambda x: x["score"], reverse=True)
 
-    # ✅ FIX: Apply price filter BEFORE slicing to ensure we actually return k items if possible
+    # Soft price filter: Prioritize in-range, but keep strong outliers to reach 'k'
     if max_price is not None:
-        scored = [g for g in scored if g.get("price", 0) <= max_price]
+        in_range = [g for g in scored if g.get("price", 0) <= max_price]
+        out_of_range = [g for g in scored if g.get("price", 0) > max_price]
+        scored = in_range + out_of_range
 
     final_results = scored[:k]
 
-    logger.info("Returning %d gifts. First gift: '%s'" % (
-        len(final_results),
-        final_results[0].get('display_name', 'NO RESULTS') if final_results else 'NO RESULTS'
-    ))
+    # Slight visual confidence boost for top 3 matches
+    for i, gift in enumerate(final_results[:3]):
+        gift["confidence"] = min(gift["confidence"] + 0.02, 0.96)
 
+    logger.info(f"Returning {len(final_results)} gifts.")
     return final_results
