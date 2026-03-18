@@ -4,6 +4,7 @@ import os
 import logging
 import traceback
 import re
+import json
 from typing import List, Dict, Optional, Set
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -65,11 +66,22 @@ def extract_meaningful_intent_tokens(query: str) -> Set[str]:
     return meaningful
 
 
-def normalize_list(value):
+def normalize_jsonb_to_list(value):
+    """Convert JSONB field to Python list of strings"""
+    if value is None:
+        return []
     if isinstance(value, list):
-        return [v.strip().lower() for v in value if v]
+        # Already a list
+        return [str(v).strip().lower() for v in value if v]
     if isinstance(value, str):
-        return [v.strip().lower() for v in value.split(",") if v.strip()]
+        # Try to parse as JSON
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(v).strip().lower() for v in parsed if v]
+        except:
+            # Not JSON, treat as comma-separated
+            return [v.strip().lower() for v in value.split(",") if v.strip()]
     return []
 
 
@@ -93,11 +105,12 @@ def compute_enhanced_score(
         partner_profile: Optional[Dict],
         partner_gift_history: List[str]
 ):
+    # ✅ FIX: Safely cast to string and handle None values to prevent + TypeError
     gift_text = (
-            gift.get("name", "") + " " +
-            gift.get("description", "") + " " +
-            " ".join(gift.get("interests", [])) + " " +
-            " ".join(gift.get("categories", []))
+            str(gift.get("name") or "") + " " +
+            str(gift.get("description") or "") + " " +
+            " ".join(gift.get("interests") or []) + " " +
+            " ".join(gift.get("categories") or [])
     ).lower()
 
     matched_intent = [t for t in meaningful_intent_tokens if t in gift_text]
@@ -188,12 +201,6 @@ def retrieve_gifts(
         raw_gifts = response.data or []
         logger.info("Retrieved %d candidates from vector search" % len(raw_gifts))
 
-        # ✅ DEBUG: Log if display_name is coming from database
-        if raw_gifts:
-            sample = raw_gifts[0]
-            logger.info("Sample gift fields: %s" % list(sample.keys()))
-            logger.info("Sample display_name: '%s'" % sample.get('display_name', 'NOT FOUND'))
-
     except Exception as e:
         logger.error("Vector search error: %s" % str(e))
         logger.error(traceback.format_exc())
@@ -202,18 +209,19 @@ def retrieve_gifts(
     scored = []
 
     for g in raw_gifts:
-        # ✅ FIX: Ensure display_name is set properly
-        # If database returns display_name, use it; otherwise fall back to name
+        # ✅ Ensure display_name is set
         if 'display_name' not in g or not g['display_name']:
             g['display_name'] = g.get('name', 'Unknown Gift')
 
-        # ✅ DEBUG: Log what we're using
-        logger.debug("Gift: %s | Display: %s" % (g.get('name', '')[:50], g.get('display_name', '')[:50]))
+        # ✅ Convert JSONB fields to Python lists
+        g["interests"] = normalize_jsonb_to_list(g.get("interests"))
+        g["categories"] = normalize_jsonb_to_list(g.get("categories"))
+        g["vibe"] = normalize_jsonb_to_list(g.get("vibe"))
+        g["occasions"] = normalize_jsonb_to_list(g.get("occasions"))
+        g["personality_traits"] = normalize_jsonb_to_list(g.get("personality_traits"))
 
-        # Normalize fields
-        g["interests"] = normalize_list(g.get("interests"))
-        g["categories"] = normalize_list(g.get("categories"))
-        g["vibe"] = normalize_list(g.get("vibe", []))
+        # ✅ Map 'link' to 'product_url' for frontend compatibility
+        g["product_url"] = g.get("link")
 
         vec_sim = g.get("similarity", 0)
         vector_score = vec_sim * VECTOR_WEIGHT
@@ -273,15 +281,16 @@ def retrieve_gifts(
 
     # Final Sort and Filter
     scored.sort(key=lambda x: x["score"], reverse=True)
+
+    # ✅ FIX: Apply price filter BEFORE slicing to ensure we actually return k items if possible
+    if max_price is not None:
+        scored = [g for g in scored if g.get("price", 0) <= max_price]
+
     final_results = scored[:k]
 
-    if max_price is not None:
-        final_results = [g for g in final_results if g.get("price", 0) <= max_price]
-
-    # ✅ FINAL CHECK: Log what we're returning
-    logger.info("Returning %d gifts. First gift display_name: '%s'" % (
+    logger.info("Returning %d gifts. First gift: '%s'" % (
         len(final_results),
-        final_results[0].get('display_name', 'NOT SET') if final_results else 'NO RESULTS'
+        final_results[0].get('display_name', 'NO RESULTS') if final_results else 'NO RESULTS'
     ))
 
     return final_results
