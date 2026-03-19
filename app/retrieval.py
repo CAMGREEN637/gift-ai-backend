@@ -130,7 +130,7 @@ def compute_enhanced_score(
         gift: Dict,
         meaningful_intent_tokens: Set[str],
         preferences: Dict,
-        user_feedback: List[Dict],  # ✅ Fixed parameter name
+        user_feedback: List[Dict],
         partner_profile: Optional[Dict],
         partner_gift_history: List[str]
 ):
@@ -168,7 +168,6 @@ def compute_enhanced_score(
 
     history_penalty = -40 if gift.get("id") in partner_gift_history else 0
 
-    # ✅ Fixed: Use user_feedback parameter
     feedback_score = 0
     for entry in user_feedback:
         if entry.get("gift_name") == gift.get("name"):
@@ -246,7 +245,6 @@ def retrieve_gifts(
         raw_gifts = response.data or []
         logger.info("Retrieved %d candidates from vector search" % len(raw_gifts))
 
-        # ✅ Debug: Log first gift to verify data structure
         if raw_gifts:
             logger.info("Sample gift keys: %s" % list(raw_gifts[0].keys()))
             logger.info("Sample similarity: %s" % raw_gifts[0].get('similarity'))
