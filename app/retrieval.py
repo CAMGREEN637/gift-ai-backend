@@ -253,8 +253,13 @@ def retrieve_gifts(
 
         g["product_url"] = g.get("link")
 
-        # Scoring Logic
-        vec_sim = g.get("similarity", 0)
+        # Safely extract numerical values, falling back to defaults if Supabase returned `null`
+        gift_price = g.get("price")
+        gift_price = float(gift_price) if gift_price is not None else 0.0
+
+        vec_sim = g.get("similarity")
+        vec_sim = float(vec_sim) if vec_sim is not None else 0.0
+
         vector_score = vec_sim * VECTOR_WEIGHT
 
         score_data = compute_enhanced_score(
@@ -262,14 +267,16 @@ def retrieve_gifts(
             user_feedback, partner_profile, partner_gift_history
         )
 
-        price_score = compute_price_score(g.get("price", 0), max_price)
+        price_score = compute_price_score(gift_price, max_price)
         novelty_score = NOVELTY_BOOST if g.get("id") not in partner_gift_history else 0
 
-        # Delivery logic
+        # Delivery logic with strict None check
         on_time_bonus = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
-            shipping_max = g.get("shipping_max_days", 8)
+            shipping_max = g.get("shipping_max_days")
+            shipping_max = int(shipping_max) if shipping_max is not None else 8
+
             if shipping_max <= days_until_needed:
                 on_time_bonus = 40
                 delivery_status = "on_time"
@@ -312,7 +319,8 @@ def retrieve_gifts(
             "confidence": confidence,
             "ranking_reasons": reasons,
             "delivery_status": delivery_status,
-            "already_purchased": score_data.get("already_purchased", False)
+            "already_purchased": score_data.get("already_purchased", False),
+            "price": gift_price  # Inject safe value back into dict for the final filter
         })
         scored.append(g)
 
@@ -336,8 +344,8 @@ def retrieve_gifts(
 
     # Soft price filter: Prioritize in-range, but keep strong outliers to reach 'k'
     if max_price is not None:
-        in_range = [g for g in scored if g.get("price", 0) <= max_price]
-        out_of_range = [g for g in scored if g.get("price", 0) > max_price]
+        in_range = [g for g in scored if g.get("price", 0.0) <= max_price]
+        out_of_range = [g for g in scored if g.get("price", 0.0) > max_price]
         scored = in_range + out_of_range
 
     final_results = scored[:k]
