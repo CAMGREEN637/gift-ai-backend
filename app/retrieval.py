@@ -153,18 +153,26 @@ def compute_enhanced_score(
     return {
         "total_boost": total_boost,
         "intent_match_count": len(matched_intent),
+        "interest_match_count": len(interest_matches),
         "matched_intent": matched_intent,
         "already_purchased": history_penalty < 0
     }
 
 
-def compute_confidence(vector_similarity: float, intent_match_count: int):
-    # Intent matches act as a floor for confidence
-    if intent_match_count >= 1:
-        if vector_similarity >= 0.75: return 0.95
-        if vector_similarity >= 0.65: return 0.89
-        return 0.85
-    return min(vector_similarity, 0.82)
+def compute_confidence(vector_similarity: float, intent_match_count: int, interest_match_count: int):
+    """
+    Creates a dynamic, spread-out confidence score rather than clustering at 85%.
+    """
+    # Base confidence mapped from vector similarity.
+    # Assumes vector similarities are usually between 0.10 and 0.60.
+    base_conf = 0.72 + (max(0, vector_similarity) * 0.35)
+
+    # Add fluid boosts for explicit keyword/interest matches
+    base_conf += (intent_match_count * 0.04)
+    base_conf += (interest_match_count * 0.02)
+
+    # Cap logically at 98% to leave room for a "perfect" 100% manually if ever needed
+    return min(round(base_conf, 2), 0.98)
 
 
 # --------------------------------------------------
@@ -175,6 +183,7 @@ def retrieve_gifts(
         query: str,
         user_id: Optional[str] = None,
         k: int = 10,
+        min_price: Optional[float] = None,
         max_price: Optional[float] = None,
         days_until_needed: Optional[int] = None,
         preferences: Optional[Dict] = None,
@@ -197,7 +206,7 @@ def retrieve_gifts(
             {
                 "query_embedding": embedding,
                 "match_threshold": VECTOR_MATCH_THRESHOLD,
-                "match_count": 80  # Increased pool size for better diversity filtering
+                "match_count": 80  # High pool size for better diversity filtering
             }
         ).execute()
 
@@ -223,15 +232,17 @@ def retrieve_gifts(
 
         g["product_url"] = g.get("link") or g.get("product_url")
 
-        # 2. Hard Filter: Price (if applicable)
+        # 2. Hard Filter: Max Price
+        current_price = 0
         try:
-            current_price = float(g.get("price", 0))
+            if g.get("price") is not None:
+                current_price = float(g["price"])
             if max_price is not None and current_price > max_price:
                 continue
         except (ValueError, TypeError):
             pass  # Keep if price is missing or malformed
 
-        # 3. Calculate Scores
+        # 3. Calculate Base Scores
         vec_sim = g.get("similarity", 0)
         vector_score = vec_sim * VECTOR_WEIGHT
 
@@ -242,11 +253,27 @@ def retrieve_gifts(
 
         novelty_score = NOVELTY_BOOST if str(g.get("id")) not in [str(id) for id in partner_gift_history] else 0
 
-        # 4. Shipping Logic
+        # 4. The "Sweet Spot" Price Edge
+        price_boost = 0
+        if current_price > 0 and max_price is not None:
+            if min_price is not None and current_price >= min_price:
+                # It's inside the user's specific range (e.g., 100-200) -> Flat boost
+                price_boost += 15
+
+                # Proportional boost based on how close it is to the max_price
+                range_span = max_price - min_price
+                if range_span > 0:
+                    position_in_range = (current_price - min_price) / range_span
+                    price_boost += (position_in_range * 15)  # Up to 15 extra points
+
+            elif min_price is None:
+                # If they only gave a max price, just favor items closer to it
+                price_boost += ((current_price / max_price) * 15)
+
+        # 5. Shipping Logic
         on_time_bonus = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
-            # Default 7 days if unknown
             shipping_max = int(g.get("shipping_max_days") or 7)
             if shipping_max <= days_until_needed:
                 on_time_bonus = 40
@@ -258,15 +285,18 @@ def retrieve_gifts(
                 on_time_bonus = -30  # Penalty for late items
                 delivery_status = "late"
 
-        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus
-        confidence = compute_confidence(vec_sim, score_data["intent_match_count"])
+        # 6. Final Tally
+        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + price_boost
 
-        # 5. Generate User-Facing Reasons
+        # Calculate the new, dynamic confidence metric
+        confidence = compute_confidence(vec_sim, score_data["intent_match_count"], score_data["interest_match_count"])
+
+        # 7. Generate User-Facing Reasons
         reasons = []
         if score_data["matched_intent"]:
             reasons.append(f"Matches: {', '.join(score_data['matched_intent'][:2])}")
 
-        if set(g["interests"]) & set(preferences.get("interests", [])):
+        if score_data["interest_match_count"] > 0:
             reasons.append("Matches your interests")
 
         if delivery_status == "on_time":
@@ -274,7 +304,7 @@ def retrieve_gifts(
 
         g.update({
             "score": final_score,
-            "confidence": round(confidence, 2),
+            "confidence": confidence,  # Already rounded to 2 decimals
             "ranking_reasons": reasons if reasons else ["Highly rated match"],
             "delivery_status": delivery_status,
             "already_purchased": score_data.get("already_purchased", False)
