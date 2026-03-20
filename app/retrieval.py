@@ -36,6 +36,9 @@ DIVERSITY_PENALTY = 20
 NOVELTY_BOOST = 10
 MAX_CATEGORY_DOMINANCE = 3
 
+# Price affinity: max bonus awarded when a gift price is at the top of the range
+PRICE_AFFINITY_MAX_BONUS = 25
+
 
 # --------------------------------------------------
 # HELPERS
@@ -92,6 +95,42 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
     return {
         "interests": [str(i).lower() for i in interests if i]
     }
+
+
+def compute_price_affinity_bonus(
+        price: float,
+        min_price: Optional[float],
+        max_price: Optional[float]
+) -> float:
+    """
+    Reward gifts that sit in the upper portion of the user's price range.
+    Returns a score bonus between 0 and PRICE_AFFINITY_MAX_BONUS.
+
+    Scoring curve:
+      - Price at or above 75% of the range  → full bonus
+      - Price between 50%-75% of the range  → half bonus
+      - Price below 50% of the range        → no bonus
+      - No range specified                  → no bonus
+    """
+    if max_price is None or price is None:
+        return 0.0
+
+    effective_min = min_price if min_price is not None else 0.0
+    price_range = max_price - effective_min
+
+    if price_range <= 0:
+        return 0.0
+
+    # Normalise price position within the range (0 = bottom, 1 = top)
+    position = (price - effective_min) / price_range
+    position = max(0.0, min(1.0, position))  # clamp to [0, 1]
+
+    if position >= 0.75:
+        return float(PRICE_AFFINITY_MAX_BONUS)
+    elif position >= 0.50:
+        return float(PRICE_AFFINITY_MAX_BONUS * 0.5)
+    else:
+        return 0.0
 
 
 # --------------------------------------------------
@@ -153,26 +192,37 @@ def compute_enhanced_score(
     return {
         "total_boost": total_boost,
         "intent_match_count": len(matched_intent),
-        "interest_match_count": len(interest_matches),
         "matched_intent": matched_intent,
         "already_purchased": history_penalty < 0
     }
 
 
-def compute_confidence(vector_similarity: float, intent_match_count: int, interest_match_count: int):
-    """
-    Creates a dynamic, spread-out confidence score rather than clustering at 85%.
-    """
-    # Base confidence mapped from vector similarity.
-    # Assumes vector similarities are usually between 0.10 and 0.60.
-    base_conf = 0.72 + (max(0, vector_similarity) * 0.35)
+def compute_confidence(vector_similarity: float, intent_match_count: int):
+    # Intent matches act as a floor for confidence
+    if intent_match_count >= 1:
+        if vector_similarity >= 0.75: return 0.95
+        if vector_similarity >= 0.65: return 0.89
+        return 0.85
+    return min(vector_similarity, 0.82)
 
-    # Add fluid boosts for explicit keyword/interest matches
-    base_conf += (intent_match_count * 0.04)
-    base_conf += (interest_match_count * 0.02)
 
-    # Cap logically at 98% to leave room for a "perfect" 100% manually if ever needed
-    return min(round(base_conf, 2), 0.98)
+def assign_ranked_confidence(results: List[Dict]) -> List[Dict]:
+    """
+    Re-assigns confidence scores based on final rank so that:
+      - Rank 1  → 0.90
+      - Rank 2  → 0.88
+      - Rank 3  → 0.86
+      - Rank 4+ → grades down by 0.01 per position, floor at 0.65
+
+    The rank-based value is used only when it is *higher* than the
+    signal-derived confidence already on the gift, preserving cases
+    where a strong vector + intent signal warrants a higher score.
+    """
+    for i, gift in enumerate(results):
+        rank_confidence = max(0.65, round(0.90 - (i * 0.02), 2))
+        # Take the higher of the two so strong signals are never penalised
+        gift["confidence"] = max(rank_confidence, gift.get("confidence", 0))
+    return results
 
 
 # --------------------------------------------------
@@ -206,7 +256,7 @@ def retrieve_gifts(
             {
                 "query_embedding": embedding,
                 "match_threshold": VECTOR_MATCH_THRESHOLD,
-                "match_count": 80  # High pool size for better diversity filtering
+                "match_count": 80  # Increased pool size for better diversity filtering
             }
         ).execute()
 
@@ -232,17 +282,15 @@ def retrieve_gifts(
 
         g["product_url"] = g.get("link") or g.get("product_url")
 
-        # 2. Hard Filter: Max Price
-        current_price = 0
+        # 2. Hard Filter: Price (if applicable)
         try:
-            if g.get("price") is not None:
-                current_price = float(g["price"])
+            current_price = float(g.get("price", 0))
             if max_price is not None and current_price > max_price:
                 continue
         except (ValueError, TypeError):
-            pass  # Keep if price is missing or malformed
+            current_price = 0.0
 
-        # 3. Calculate Base Scores
+        # 3. Calculate Scores
         vec_sim = g.get("similarity", 0)
         vector_score = vec_sim * VECTOR_WEIGHT
 
@@ -253,27 +301,21 @@ def retrieve_gifts(
 
         novelty_score = NOVELTY_BOOST if str(g.get("id")) not in [str(id) for id in partner_gift_history] else 0
 
-        # 4. The "Sweet Spot" Price Edge
-        price_boost = 0
-        if current_price > 0 and max_price is not None:
-            if min_price is not None and current_price >= min_price:
-                # It's inside the user's specific range (e.g., 100-200) -> Flat boost
-                price_boost += 15
-
-                # Proportional boost based on how close it is to the max_price
-                range_span = max_price - min_price
-                if range_span > 0:
-                    position_in_range = (current_price - min_price) / range_span
-                    price_boost += (position_in_range * 15)  # Up to 15 extra points
-
-            elif min_price is None:
-                # If they only gave a max price, just favor items closer to it
-                price_boost += ((current_price / max_price) * 15)
+        # 4. Price affinity bonus — rewards gifts near the top of the user's range
+        try:
+            price_affinity = compute_price_affinity_bonus(
+                price=float(g.get("price", 0)),
+                min_price=min_price,
+                max_price=max_price
+            )
+        except (ValueError, TypeError):
+            price_affinity = 0.0
 
         # 5. Shipping Logic
         on_time_bonus = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
+            # Default 7 days if unknown
             shipping_max = int(g.get("shipping_max_days") or 7)
             if shipping_max <= days_until_needed:
                 on_time_bonus = 40
@@ -285,18 +327,15 @@ def retrieve_gifts(
                 on_time_bonus = -30  # Penalty for late items
                 delivery_status = "late"
 
-        # 6. Final Tally
-        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + price_boost
+        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + price_affinity
+        confidence = compute_confidence(vec_sim, score_data["intent_match_count"])
 
-        # Calculate the new, dynamic confidence metric
-        confidence = compute_confidence(vec_sim, score_data["intent_match_count"], score_data["interest_match_count"])
-
-        # 7. Generate User-Facing Reasons
+        # 6. Generate User-Facing Reasons
         reasons = []
         if score_data["matched_intent"]:
             reasons.append(f"Matches: {', '.join(score_data['matched_intent'][:2])}")
 
-        if score_data["interest_match_count"] > 0:
+        if set(g["interests"]) & set(preferences.get("interests", [])):
             reasons.append("Matches your interests")
 
         if delivery_status == "on_time":
@@ -304,7 +343,7 @@ def retrieve_gifts(
 
         g.update({
             "score": final_score,
-            "confidence": confidence,  # Already rounded to 2 decimals
+            "confidence": round(confidence, 2),
             "ranking_reasons": reasons if reasons else ["Highly rated match"],
             "delivery_status": delivery_status,
             "already_purchased": score_data.get("already_purchased", False)
@@ -324,6 +363,9 @@ def retrieve_gifts(
     # Final Sort
     scored.sort(key=lambda x: x["score"], reverse=True)
     final_results = scored[:k]
+
+    # Re-assign confidence based on final rank so scores vary meaningfully
+    final_results = assign_ranked_confidence(final_results)
 
     logger.info(f"Final Selection: {[f.get('display_name') for f in final_results]}")
 
