@@ -160,10 +160,23 @@ def compute_enhanced_score(
     matched_intent = [t for t in meaningful_intent_tokens if t in gift_text]
     intent_score = len(matched_intent) * INTENT_WEIGHT
 
-    interest_matches = set(g_interests) & set(preferences.get("interests", []))
-    # Also check categories and name so e.g. "coffee" quiz pick matches a coffeemaker
-    gift_all_tags = set(g_interests) | set(g_categories) | set(tokenize(str(gift.get("name") or "")))
-    broad_interest_matches = gift_all_tags & set(preferences.get("interests", []))
+    # Substring-based interest matching: "coffee" matches "coffee lover", "pour-over coffee", etc.
+    # Searches across interests, categories, name, and description — not just the interests tag.
+    user_interests = [i.lower().strip() for i in preferences.get("interests", []) if i]
+    gift_all_text_blob = " ".join([
+        " ".join(g_interests),
+        " ".join(g_categories),
+        str(gift.get("name") or ""),
+        str(gift.get("description") or ""),
+    ]).lower()
+
+    broad_interest_matches = set()
+    for interest in user_interests:
+        for token in interest.split():
+            if len(token) > 2 and token in gift_all_text_blob:
+                broad_interest_matches.add(interest)
+                break
+
     session_score = len(broad_interest_matches) * SESSION_WEIGHT
 
     profile_score = 0
@@ -333,6 +346,20 @@ def retrieve_gifts(
 
         final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + price_affinity
         confidence = compute_confidence(vec_sim, score_data["intent_match_count"])
+
+        # DEBUG: log score breakdown for key gifts
+        gift_name_lower = str(g.get("name") or "").lower()
+        if any(kw in gift_name_lower for kw in ["coffee", "duffel", "weekender"]):
+            logger.info(
+                f"[SCORE DEBUG] '{g.get('name')}' | "
+                f"vec_sim={vec_sim:.3f} vec_score={vector_score:.1f} | "
+                f"intent={score_data['intent_match_count']} ({score_data['matched_intent']}) intent_score={score_data['intent_match_count'] * INTENT_WEIGHT} | "
+                f"interests={list(score_data['broad_interest_matches'])} session_score={len(score_data['broad_interest_matches']) * SESSION_WEIGHT} | "
+                f"price_affinity={price_affinity:.1f} novelty={novelty_score} shipping={on_time_bonus} | "
+                f"TOTAL={final_score:.1f} | "
+                f"prefs_interests={preferences.get('interests')} | "
+                f"gift_interests={g.get('interests')} gift_categories={g.get('categories')}"
+            )
 
         # 6. Generate User-Facing Reasons
         reasons = []
