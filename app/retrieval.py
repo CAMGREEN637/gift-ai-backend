@@ -27,9 +27,9 @@ GENERIC_TOKENS = {
 }
 
 VECTOR_MATCH_THRESHOLD = 0.15
-VECTOR_WEIGHT = 100
-INTENT_WEIGHT = 15
-SESSION_WEIGHT = 5
+VECTOR_WEIGHT = 60  # Reduced so vector alone can't override explicit interest matches
+INTENT_WEIGHT = 40  # Strong bonus per keyword match in gift text (e.g. "coffee")
+SESSION_WEIGHT = 35  # Strong bonus when gift interests overlap with selected quiz interests
 PROFILE_WEIGHT = 3
 
 DIVERSITY_PENALTY = 20
@@ -161,7 +161,10 @@ def compute_enhanced_score(
     intent_score = len(matched_intent) * INTENT_WEIGHT
 
     interest_matches = set(g_interests) & set(preferences.get("interests", []))
-    session_score = len(interest_matches) * SESSION_WEIGHT
+    # Also check categories and name so e.g. "coffee" quiz pick matches a coffeemaker
+    gift_all_tags = set(g_interests) | set(g_categories) | set(tokenize(str(gift.get("name") or "")))
+    broad_interest_matches = gift_all_tags & set(preferences.get("interests", []))
+    session_score = len(broad_interest_matches) * SESSION_WEIGHT
 
     profile_score = 0
     if partner_profile:
@@ -193,7 +196,8 @@ def compute_enhanced_score(
         "total_boost": total_boost,
         "intent_match_count": len(matched_intent),
         "matched_intent": matched_intent,
-        "already_purchased": history_penalty < 0
+        "already_purchased": history_penalty < 0,
+        "broad_interest_matches": broad_interest_matches,
     }
 
 
@@ -335,7 +339,7 @@ def retrieve_gifts(
         if score_data["matched_intent"]:
             reasons.append(f"Matches: {', '.join(score_data['matched_intent'][:2])}")
 
-        if set(g["interests"]) & set(preferences.get("interests", [])):
+        if score_data["broad_interest_matches"]:
             reasons.append("Matches your interests")
 
         if delivery_status == "on_time":
