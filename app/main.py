@@ -1,11 +1,11 @@
 # app/main.py
 
 import os
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import FastAPI, Header, HTTPException, Depends, Response
+from fastapi import FastAPI, Header, HTTPException, Depends, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -142,14 +142,16 @@ def recommend(
         partner_id: Optional[str] = None,
         partner_name: Optional[str] = None,
         max_price: Optional[int] = None,
+        min_price: Optional[int] = None,
         days_until_needed: Optional[int] = None,
         occasion: Optional[str] = None,
         relationship: Optional[str] = None,
+        interests: List[str] = Query(default=[]),  # Quiz interests passed directly
         db: Client = Depends(get_db),
         ip_address: str = Depends(check_rate_limit_dependency)
 ):
-    logger.info("Recommendation request: query=%s, partner_id=%s, partner_name=%s, occasion=%s, relationship=%s" % (
-        query, partner_id, partner_name, occasion, relationship
+    logger.info("Recommendation request: query=%s, partner_id=%s, partner_name=%s, occasion=%s, relationship=%s, interests=%s" % (
+        query, partner_id, partner_name, occasion, relationship, interests
     ))
 
     # Load session preferences
@@ -158,15 +160,18 @@ def recommend(
     inferred = get_inferred(user_id) if user_id else {"interests": {}, "vibe": {}}
 
     merged_preferences = {
-        "interests": (
-                explicit["interests"]
-                + [key for key, weight in inferred["interests"].items() for _ in range(weight)]
-        ),
+        "interests": list(set(
+            interests  # Quiz interests take priority
+            + explicit["interests"]
+            + [key for key, weight in inferred["interests"].items() for _ in range(weight)]
+        )),
         "vibe": (
                 explicit["vibe"]
                 + [key for key, weight in inferred["vibe"].items() for _ in range(weight)]
         ),
     }
+
+    logger.info("Merged preferences: %s" % merged_preferences)
 
     # Load recipient profile from user_profiles
     recipient_profile = None
@@ -214,6 +219,7 @@ def recommend(
     gifts = retrieve_gifts(
         query=query,
         user_id=user_id,
+        min_price=min_price,
         max_price=max_price,
         days_until_needed=days_until_needed,
         preferences=merged_preferences,

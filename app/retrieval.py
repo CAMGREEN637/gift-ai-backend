@@ -347,20 +347,6 @@ def retrieve_gifts(
         final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + price_affinity
         confidence = compute_confidence(vec_sim, score_data["intent_match_count"])
 
-        # DEBUG: log score breakdown for key gifts
-        gift_name_lower = str(g.get("name") or "").lower()
-        if any(kw in gift_name_lower for kw in ["coffee", "duffel", "weekender"]):
-            logger.info(
-                f"[SCORE DEBUG] '{g.get('name')}' | "
-                f"vec_sim={vec_sim:.3f} vec_score={vector_score:.1f} | "
-                f"intent={score_data['intent_match_count']} ({score_data['matched_intent']}) intent_score={score_data['intent_match_count'] * INTENT_WEIGHT} | "
-                f"interests={list(score_data['broad_interest_matches'])} session_score={len(score_data['broad_interest_matches']) * SESSION_WEIGHT} | "
-                f"price_affinity={price_affinity:.1f} novelty={novelty_score} shipping={on_time_bonus} | "
-                f"TOTAL={final_score:.1f} | "
-                f"prefs_interests={preferences.get('interests')} | "
-                f"gift_interests={g.get('interests')} gift_categories={g.get('categories')}"
-            )
-
         # 6. Generate User-Facing Reasons
         reasons = []
         if score_data["matched_intent"]:
