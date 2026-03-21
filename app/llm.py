@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 from typing import List, Dict, Optional
 import json
 import logging
-import traceback
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -60,6 +59,47 @@ Return ONLY the clean display name, nothing else."""
         return " ".join(words)
 
 
+def _fuzzy_match_reason(orig_name: str, llm_gifts: List[Dict]) -> Optional[str]:
+    """
+    Match a gift's original name to the closest LLM response entry.
+
+    Strategy (in order of preference):
+      1. Exact lowercase match
+      2. LLM name is a substring of original name (or vice versa)
+      3. Most shared words (token overlap) — picks the best scoring entry
+    Returns None if no reasonable match is found.
+    """
+    if not llm_gifts:
+        return None
+
+    orig_lower = orig_name.lower()
+    orig_tokens = set(orig_lower.split())
+
+    # 1. Exact match
+    for g in llm_gifts:
+        if g.get("name", "").lower() == orig_lower:
+            return g.get("reason")
+
+    # 2. Substring match
+    for g in llm_gifts:
+        llm_name = g.get("name", "").lower()
+        if llm_name and (llm_name in orig_lower or orig_lower in llm_name):
+            return g.get("reason")
+
+    # 3. Best token overlap
+    best_reason = None
+    best_score = 0
+    for g in llm_gifts:
+        llm_tokens = set(g.get("name", "").lower().split())
+        shared = len(orig_tokens & llm_tokens)
+        # Require at least 2 shared words to avoid false positives
+        if shared > best_score and shared >= 2:
+            best_score = shared
+            best_reason = g.get("reason")
+
+    return best_reason
+
+
 def generate_gift_response(
         query: str,
         gifts: List[Dict],
@@ -89,10 +129,8 @@ def generate_gift_response(
 
     if recipient_name:
         recipient_display = recipient_name
-        possessive = "%s's" % recipient_name
     else:
         recipient_display = "your %s" % relationship if relationship else "them"
-        possessive = "their"
 
     context_text = """
 RECIPIENT: %s
@@ -132,29 +170,32 @@ Description: %s
 ---
 """ % (i, name, price, conf, reasons, desc)
 
-    occ_display = occasion or "this special moment"
-    rel_display = relationship or "your connection"
-
     system_prompt = """
 You are an expert gift consultant helping someone choose a meaningful gift for %s.
 %s
-1. UNIQUENESS IS MANDATORY: Each explanation must be completely different.
-2. USE THE RECIPIENT'S NAME: Always use "%s" in every explanation.
-3. OUTPUT FORMAT: Valid JSON only.
-""" % (recipient_display, context_text, recipient_name or "the recipient's name")
+RULES:
+1. UNIQUENESS IS MANDATORY: Each explanation must be completely different. Never reuse phrases across gifts.
+2. USE THE RECIPIENT'S NAME: Always mention "%s" in every reason.
+3. Be specific to each product — reference its actual features, not generic praise.
+4. OUTPUT FORMAT: Valid JSON only. Use the exact gift name from the list in your response.
+""" % (recipient_display, context_text, recipient_name or "the recipient")
 
     user_prompt = """
 User's search: "%s"
-JSON Format:
+
+Return a JSON object in this exact format:
 {
   "intro": "One warm, natural sentence mentioning the recipient and the occasion",
   "gifts": [
     {
-      "name": "exact gift name from the list",
-      "reason": "Unique 2-3 sentence explanation"
+      "name": "use the EXACT gift name from the list below",
+      "reason": "Unique 2-3 sentence explanation referencing the specific product and recipient"
     }
   ]
 }
+
+You MUST include a reason for every gift in the list. Use the exact name as given.
+
 Gifts:
 %s
 """ % (query, gift_context)
@@ -173,26 +214,33 @@ Gifts:
         tokens_used = response.usage.total_tokens if response.usage else 0
         content = response.choices[0].message.content.strip()
         parsed = json.loads(content)
+        logger.info(f"LLM returned reasons for {len(parsed.get('gifts', []))} gifts")
 
     except Exception as e:
         logger.error("LLM Generation failed: %s" % str(e))
         parsed = {"intro": "Here are some gifts for %s:" % recipient_display, "gifts": []}
         tokens_used = 0
 
-    enriched = []
-    llm_results_by_name = {g.get("name", "").lower(): g.get("reason", "") for g in parsed.get("gifts", [])}
+    llm_gifts = parsed.get("gifts", [])
 
+    enriched = []
     for idx, original in enumerate(gifts):
-        orig_name = original.get("name", "").lower()
-        reason = llm_results_by_name.get(orig_name, "This is a thoughtful match for their current interests.")
+        orig_name = original.get("name", "")
+
+        # Use fuzzy matching so shortened/paraphrased LLM names still resolve correctly
+        reason = _fuzzy_match_reason(orig_name, llm_gifts)
+
+        if not reason:
+            logger.warning(f"No LLM reason matched for gift: '{orig_name}'")
+            reason = "A highly relevant pick based on their interests and your search."
 
         # Ensure we have a clean display name for the frontend
         display_name = original.get("display_name")
         if not display_name:
-            display_name = generate_display_name(original.get("name", ""), original.get("description", ""))
+            display_name = generate_display_name(orig_name, original.get("description", ""))
 
         enriched.append({
-            "name": original.get("name", ""),
+            "name": orig_name,
             "display_name": display_name,
             "price": original.get("price", 0),
             "confidence": original.get("confidence", 0),
