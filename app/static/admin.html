@@ -166,6 +166,38 @@
 
         .btn-secondary:hover {
             background: #475569;
+            box-shadow: 0 4px 8px rgba(100, 116, 139, 0.3);
+        }
+
+        /* Manual entry button - distinct styling */
+        .btn-manual {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+            margin-left: 12px;
+        }
+
+        .btn-manual:hover {
+            background: #f0f0ff;
+            box-shadow: 0 4px 8px rgba(102, 126, 234, 0.2);
+        }
+
+        /* Divider between fetch and manual entry */
+        .or-divider {
+            display: inline-flex;
+            align-items: center;
+            margin: 0 16px;
+            color: #aaa;
+            font-size: 14px;
+            font-weight: 500;
+            vertical-align: middle;
+        }
+
+        .button-row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 4px;
         }
 
         .quality-indicator {
@@ -273,15 +305,47 @@
             border-left: 4px solid #3b82f6;
         }
 
+        .alert-warning {
+            background: #fef3c7;
+            color: #92400e;
+            border-left: 4px solid #f59e0b;
+        }
+
         .grid-2 {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 20px;
         }
 
+        /* Badge shown in the form header when in manual mode */
+        .mode-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 99px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        .mode-badge-manual {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .mode-badge-scraped {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
         @media (max-width: 768px) {
             .grid-2 {
                 grid-template-columns: 1fr;
+            }
+
+            .btn-manual {
+                margin-left: 0;
+                margin-top: 10px;
             }
         }
     </style>
@@ -295,21 +359,26 @@
 
         <div id="alert" class="alert"></div>
 
-        <!-- Step 1: Fetch Amazon Product -->
+        <!-- Step 1: Fetch Amazon Product OR Add Manually -->
         <div class="card">
-            <h2 class="card-title">Step 1: Fetch Amazon Product</h2>
+            <h2 class="card-title">Step 1: Add Product</h2>
             <div class="form-group">
                 <label for="amazonUrl">Amazon Product URL</label>
                 <input
                     type="url"
                     id="amazonUrl"
                     placeholder="https://www.amazon.com/dp/B00EXAMPLE..."
-                    required
                 />
             </div>
-            <button id="fetchBtn" onclick="fetchAmazonProduct()">
-                Fetch Product Details
-            </button>
+            <div class="button-row">
+                <button id="fetchBtn" onclick="fetchAmazonProduct()">
+                    Fetch from Amazon
+                </button>
+                <span class="or-divider">or</span>
+                <button class="btn-manual" onclick="addManually()">
+                    ✏️ Add Manually
+                </button>
+            </div>
 
             <div id="fetchLoading" class="loading">
                 <div class="spinner"></div>
@@ -334,7 +403,10 @@
 
         <!-- Step 3: Edit Product Details -->
         <div id="productForm" class="card" style="display: none;">
-            <h2 class="card-title">Step 3: Review & Edit Product Details</h2>
+            <h2 class="card-title">
+                <span id="formTitle">Step 3: Review &amp; Edit Product Details</span>
+                <span id="modeBadge" class="mode-badge" style="display:none;"></span>
+            </h2>
 
             <form id="editForm">
                 <div class="grid-2">
@@ -343,6 +415,11 @@
                         <div class="form-group">
                             <label for="productName">Product Name *</label>
                             <input type="text" id="productName" required />
+                        </div>
+
+                        <div class="form-group">
+                            <label for="displayName">Display Name <span style="color:#aaa; font-weight:400;">(shown to users)</span></label>
+                            <input type="text" id="displayName" placeholder="Short, clean name for the gift card" />
                         </div>
 
                         <div class="form-group">
@@ -387,6 +464,21 @@
                                 <option value="walmart">Walmart</option>
                                 <option value="other">Other</option>
                             </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="rating">Rating (0–5)</label>
+                            <input type="number" id="rating" step="0.1" min="0" max="5" placeholder="e.g. 4.3" />
+                        </div>
+
+                        <div class="form-group">
+                            <label for="reviewCount">Review Count</label>
+                            <input type="number" id="reviewCount" min="0" placeholder="e.g. 248" />
+                        </div>
+
+                        <div class="form-group" style="display:flex; align-items:center; gap:10px;">
+                            <input type="checkbox" id="inStock" checked style="width:auto;" />
+                            <label for="inStock" style="margin-bottom:0;">In Stock</label>
                         </div>
                     </div>
 

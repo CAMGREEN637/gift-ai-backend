@@ -28,7 +28,6 @@ from app.admin_products import (
     get_product_stats
 )
 from app.database import get_db
-# ✅ New imports for display name and search readiness
 from app.llm import generate_display_name
 from app.embeddings import generate_embedding, create_gift_text_for_embedding
 from supabase import Client
@@ -64,6 +63,29 @@ class ShippingUpdate(BaseModel):
     shipping_notes: Optional[str] = None
 
 
+class ManualProductRequest(BaseModel):
+    """Request body for manually entered products (no Amazon scrape needed)."""
+    name: str
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    brand: Optional[str] = None
+    price: float
+    currency: str = "USD"
+    link: Optional[str] = None
+    image_url: Optional[str] = None
+    source: str = "other"
+    categories: List[str] = []
+    interests: List[str] = []
+    occasions: List[str] = []
+    vibe: List[str] = []
+    personality_traits: List[str] = []
+    recipient: Optional[dict] = None
+    experience_level: str = "beginner"
+    rating: Optional[float] = None
+    review_count: int = 0
+    in_stock: bool = True
+
+
 # ============================================
 # Amazon Product Fetching & Automation
 # ============================================
@@ -85,7 +107,7 @@ async def fetch_amazon_product_endpoint(
         if not product_data:
             raise HTTPException(status_code=404, detail="Product details could not be scraped")
 
-        # ✅ Generate clean display name via LLM
+        # Generate clean display name via LLM
         display_name = generate_display_name(
             product_name=product_data.get('name', ''),
             description=product_data.get('description', '')
@@ -93,7 +115,7 @@ async def fetch_amazon_product_endpoint(
 
         logger.info("✨ Display Name Generated: %s" % display_name)
 
-        # ✅ Prepare for search: Generate Embeddings
+        # Prepare for search: Generate Embeddings
         gift_temp = {
             "name": product_data.get('name'),
             "description": product_data.get('description', ''),
@@ -102,10 +124,10 @@ async def fetch_amazon_product_endpoint(
         embedding_text = create_gift_text_for_embedding(gift_temp)
         embedding = generate_embedding(embedding_text)
 
-        # ✅ Save to Supabase
+        # Save to Supabase
         result = db.table('gifts').insert({
-            'name': product_data.get('name'),  # Rich SEO name for search
-            'display_name': display_name,  # Clean name for users
+            'name': product_data.get('name'),
+            'display_name': display_name,
             'price': product_data.get('price', 0.0),
             'description': product_data.get('description', ''),
             'image_url': product_data.get('image_url'),
@@ -129,6 +151,90 @@ async def fetch_amazon_product_endpoint(
 
     except Exception as e:
         logger.error("Error in fetch-amazon: %s" % str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# Manual Product Creation (NEW)
+# ============================================
+
+@router.post("/api/products/manual")
+async def create_manual_product_endpoint(
+        request: ManualProductRequest,
+        db: Client = Depends(get_db),
+        _: None = Depends(verify_admin)
+):
+    """
+    Create a product manually without Amazon scraping.
+    Generates a display name (if not provided) and embeddings,
+    then saves to the database with the full tag schema.
+    """
+    try:
+        logger.info("Creating manual product: %s" % request.name)
+
+        # Generate display name if not manually provided
+        display_name = request.display_name
+        if not display_name:
+            display_name = generate_display_name(
+                product_name=request.name,
+                description=request.description or ''
+            )
+            logger.info("✨ Auto-generated display name: %s" % display_name)
+
+        # Generate embedding for search
+        gift_temp = {
+            "name": request.name,
+            "description": request.description or '',
+            "categories": request.categories
+        }
+        embedding_text = create_gift_text_for_embedding(gift_temp)
+        embedding = generate_embedding(embedding_text)
+
+        # Build the full record — matching the existing gifts table schema
+        record = {
+            'name': request.name,
+            'display_name': display_name,
+            'description': request.description,
+            'brand': request.brand,
+            'price': request.price,
+            'currency': request.currency,
+            'product_url': request.link,
+            'image_url': request.image_url,
+            'source': request.source,
+            'categories': request.categories,
+            'interests': request.interests,
+            'occasions': request.occasions,
+            'vibe': request.vibe,
+            'personality_traits': request.personality_traits,
+            'recipient': request.recipient or {},
+            'experience_level': request.experience_level,
+            'rating': request.rating,
+            'review_count': request.review_count,
+            'in_stock': request.in_stock,
+            'embedding': embedding,
+            # Default shipping for manually entered products
+            'shipping_min_days': 5,
+            'shipping_max_days': 8,
+            'is_prime_eligible': False,
+        }
+
+        result = db.table('gifts').insert(record).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to insert manual product into database")
+
+        saved = result.data[0]
+        logger.info("Manual product saved: %s (%s)" % (saved.get('id'), request.name))
+
+        return {
+            "success": True,
+            "id": saved.get('id'),
+            "product": saved,
+            "display_name": display_name
+        }
+
+    except Exception as e:
+        logger.error("Error creating manual product: %s" % str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -166,6 +272,41 @@ async def list_products_endpoint(
 ):
     """List products with pagination and filtering."""
     return list_products(page, page_size, sort_by, sort_desc, search, category, in_stock_only)
+
+
+@router.post("/api/products")
+async def create_product_endpoint(request: ProductSaveRequest, _: None = Depends(verify_admin)):
+    """
+    Save a product built from the admin form (post-scrape or post-manual).
+    Routes to the manual creation path which handles embeddings + display name.
+    """
+    try:
+        product = request.product
+        manual_req = ManualProductRequest(
+            name=product.name,
+            display_name=getattr(product, 'display_name', None),
+            description=product.description,
+            brand=product.brand,
+            price=product.price,
+            currency=product.currency or "USD",
+            link=product.link,
+            image_url=product.image_url,
+            source=product.source or "other",
+            categories=product.categories or [],
+            interests=product.interests or [],
+            occasions=product.occasions or [],
+            vibe=product.vibe or [],
+            personality_traits=product.personality_traits or [],
+            recipient=product.recipient.dict() if product.recipient else {},
+            experience_level=product.experience_level or "beginner",
+            rating=product.rating,
+            review_count=product.review_count or 0,
+            in_stock=product.in_stock if product.in_stock is not None else True,
+        )
+        saved = save_product(product, request.created_by or "admin")
+        return {"id": saved.id, "status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/products/{product_id}", response_model=GiftProduct)
