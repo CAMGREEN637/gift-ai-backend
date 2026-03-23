@@ -846,7 +846,7 @@ async function saveProduct(event) {
             in_stock:          document.getElementById('inStock').checked
         };
 
-        const saved = await apiRequest('/products', 'POST', { product, created_by: 'admin' });
+        const saved = await apiRequest('/products/manual', 'POST', product);
         showAlert(`Product saved successfully! ID: ${saved.id}`, 'success');
         setTimeout(() => resetForm(), 2000);
 

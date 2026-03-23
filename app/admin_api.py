@@ -71,7 +71,7 @@ class ManualProductRequest(BaseModel):
     brand: Optional[str] = None
     price: float
     currency: str = "USD"
-    link: Optional[str] = None
+    link: Optional[str] = None          # JS sends 'link'; stored as product_url in DB
     image_url: Optional[str] = None
     source: str = "other"
     categories: List[str] = []
@@ -198,7 +198,7 @@ async def create_manual_product_endpoint(
             'brand': request.brand,
             'price': request.price,
             'currency': request.currency,
-            'product_url': request.link,
+            'product_url': request.link,        # JS sends 'link', DB column is 'product_url'
             'image_url': request.image_url,
             'source': request.source,
             'categories': request.categories,
@@ -212,7 +212,6 @@ async def create_manual_product_endpoint(
             'review_count': request.review_count,
             'in_stock': request.in_stock,
             'embedding': embedding,
-            # Default shipping for manually entered products
             'shipping_min_days': 5,
             'shipping_max_days': 8,
             'is_prime_eligible': False,
