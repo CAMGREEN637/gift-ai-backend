@@ -371,11 +371,11 @@
                 />
             </div>
             <div class="button-row">
-                <button id="fetchBtn" onclick="fetchAmazonProduct()">
+                <button type="button" id="fetchBtn" onclick="fetchAmazonProduct()">
                     Fetch from Amazon
                 </button>
                 <span class="or-divider">or</span>
-                <button class="btn-manual" onclick="addManually()">
+                <button type="button" class="btn-manual" onclick="addManually()">
                     ✏️ Add Manually
                 </button>
             </div>
@@ -391,7 +391,7 @@
         <!-- Step 2: AI Categorization -->
         <div id="categorizationSection" class="card" style="display: none;">
             <h2 class="card-title">Step 2: AI-Powered Categorization</h2>
-            <button id="categorizeBtn" onclick="categorizeProduct()">
+            <button type="button" id="categorizeBtn" onclick="categorizeProduct()">
                 Suggest Categories with AI
             </button>
 
@@ -547,6 +547,331 @@
         </div>
     </div>
 
-    <script src="/static/admin.js"></script>
+    <script>
+// Admin Dashboard JavaScript
+
+const API_BASE = '/admin/api';
+const API_KEY = prompt('Enter Admin API Key:') || '';
+
+let currentProduct = null;
+let isManualEntry = false;
+
+const OPTIONS = {
+    categories: ["tech", "home", "kitchen", "fashion", "beauty", "fitness", "outdoors", "hobby", "book", "experiences"],
+    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "tea", "fashion", "skincare", "makeup"],
+    occasions: ["birthday", "anniversary", "valentines", "mothers_day", "holiday", "christmas", "wedding", "engagement", "graduation", "just_because"],
+    gender: ["male", "female", "unisex"],
+    relationship: ["partner", "spouse", "boyfriend", "girlfriend", "friend", "family"],
+    vibe: ["romantic", "practical", "luxury", "fun", "sentimental", "creative", "cozy", "adventurous", "minimalist"],
+    traits: ["introverted", "extroverted", "analytical", "creative", "sentimental", "adventurous", "organized", "relaxed", "curious"]
+};
+
+const LIMITS = { categories: 2, interests: 5, occasions: 4, vibe: 3, traits: 3 };
+
+const OPTION_LABELS = { mothers_day: "Mother's Day", just_because: "Just Because" };
+
+function showAlert(message, type = 'info') {
+    const el = document.getElementById('alert');
+    el.className = `alert alert-${type} show`;
+    el.textContent = message;
+    setTimeout(() => { el.className = 'alert'; }, 5000);
+}
+
+function showLoading(id, show = true) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', show);
+}
+
+async function apiRequest(endpoint, method = 'GET', body = null) {
+    const options = {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY }
+    };
+    if (body) options.body = JSON.stringify(body);
+    const response = await fetch(`${API_BASE}${endpoint}`, options);
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Request failed');
+    }
+    return response.json();
+}
+
+// ── Step 1a: Fetch from Amazon ──────────────────────────────────────────────
+
+async function fetchAmazonProduct() {
+    const url = document.getElementById('amazonUrl').value;
+    if (!url) { showAlert('Please enter an Amazon URL', 'error'); return; }
+
+    showLoading('fetchLoading', true);
+    document.getElementById('fetchBtn').disabled = true;
+
+    try {
+        const product = await apiRequest('/fetch-amazon', 'POST', { url });
+        currentProduct = product;
+        isManualEntry = false;
+        displayProductPreview(product);
+        document.getElementById('categorizationSection').style.display = 'block';
+        showAlert('Product fetched successfully!', 'success');
+    } catch (error) {
+        showAlert(`Error: ${error.message}`, 'error');
+    } finally {
+        showLoading('fetchLoading', false);
+        document.getElementById('fetchBtn').disabled = false;
+    }
+}
+
+function displayProductPreview(product) {
+    const preview = document.getElementById('productPreview');
+    preview.innerHTML = `
+        <div class="product-preview">
+            <div>
+                ${product.image_url
+                    ? `<img src="${product.image_url}" alt="${product.name}" />`
+                    : '<div style="background:#ddd;width:150px;height:150px;display:flex;align-items:center;justify-content:center;">No Image</div>'}
+            </div>
+            <div class="preview-details">
+                <h3>${product.name}</h3>
+                <p><strong>Brand:</strong> ${product.brand || 'N/A'}</p>
+                <p><strong>Price:</strong> $${product.price || 'N/A'}</p>
+                <p><strong>ASIN:</strong> ${product.asin || 'N/A'}</p>
+                <p><strong>Description:</strong> ${product.description ? product.description.substring(0, 200) + '...' : 'N/A'}</p>
+                <div style="margin-top:10px;">${getQualityIndicators(product)}</div>
+            </div>
+        </div>`;
+    preview.style.display = 'block';
+}
+
+function getQualityIndicators(product) {
+    let html = '';
+    if (product.rating) {
+        const cls = product.rating >= 4 ? 'excellent' : product.rating >= 3 ? 'warning' : 'poor';
+        html += `<span class="quality-indicator quality-${cls}">⭐ ${product.rating}/5</span>`;
+    }
+    if (product.review_count !== undefined) {
+        const cls = product.review_count >= 50 ? 'excellent' : product.review_count >= 10 ? 'warning' : 'poor';
+        html += `<span class="quality-indicator quality-${cls}">💬 ${product.review_count} reviews</span>`;
+    }
+    const stockCls = product.in_stock ? 'excellent' : 'poor';
+    html += `<span class="quality-indicator quality-${stockCls}">${product.in_stock ? '✓ In Stock' : '✗ Out of Stock'}</span>`;
+    return html;
+}
+
+// ── Step 1b: Manual Entry ───────────────────────────────────────────────────
+
+function addManually() {
+    isManualEntry = true;
+    currentProduct = null;
+
+    document.getElementById('productPreview').style.display = 'none';
+
+    populateProductForm(null, null);
+
+    document.getElementById('categorizationSection').style.display = 'block';
+    document.getElementById('productForm').style.display = 'block';
+
+    document.getElementById('formTitle').textContent = 'Add Product Details';
+    const badge = document.getElementById('modeBadge');
+    badge.textContent = '✏️ Manual Entry';
+    badge.className = 'mode-badge mode-badge-manual';
+    badge.style.display = 'inline-block';
+
+    showAlert("Fill in the product details below. You can still use AI to suggest categories once you've entered a name and description.", 'info');
+    document.getElementById('productForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── Step 2: AI Categorization ───────────────────────────────────────────────
+
+async function categorizeProduct() {
+    const name = isManualEntry ? document.getElementById('productName').value : currentProduct?.name;
+    const description = isManualEntry ? document.getElementById('description').value : (currentProduct?.description || '');
+    const brand = isManualEntry ? document.getElementById('brand').value : (currentProduct?.brand || '');
+
+    if (!name) { showAlert('Please enter a product name before requesting AI categorization', 'error'); return; }
+
+    showLoading('categorizeLoading', true);
+    document.getElementById('categorizeBtn').disabled = true;
+
+    try {
+        const categorization = await apiRequest('/categorize', 'POST', { name, description, brand });
+        applyCategorizationToForm(categorization);
+        showAlert('AI categorization applied! Review and adjust as needed.', 'success');
+    } catch (error) {
+        showAlert(`Categorization error: ${error.message}`, 'error');
+    } finally {
+        showLoading('categorizeLoading', false);
+        document.getElementById('categorizeBtn').disabled = false;
+    }
+}
+
+// ── Step 3: Product Form ────────────────────────────────────────────────────
+
+function populateProductForm(product, categorization) {
+    document.getElementById('productName').value    = product?.name || '';
+    document.getElementById('displayName').value    = product?.display_name || '';
+    document.getElementById('description').value    = product?.description || '';
+    document.getElementById('brand').value          = product?.brand || '';
+    document.getElementById('price').value          = product?.price || '';
+    document.getElementById('currency').value       = product?.currency || 'USD';
+    document.getElementById('link').value           = product?.link || product?.product_url || '';
+    document.getElementById('imageUrl').value       = product?.image_url || '';
+    document.getElementById('source').value         = product?.source || 'amazon';
+    document.getElementById('rating').value         = product?.rating || '';
+    document.getElementById('reviewCount').value    = product?.review_count || '';
+    document.getElementById('inStock').checked      = product?.in_stock !== false;
+
+    if (!isManualEntry && product) {
+        document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
+        const badge = document.getElementById('modeBadge');
+        badge.textContent = '✅ Amazon Scraped';
+        badge.className = 'mode-badge mode-badge-scraped';
+        badge.style.display = 'inline-block';
+    }
+
+    initMultiSelect('categories', OPTIONS.categories, LIMITS.categories);
+    initMultiSelect('interests',  OPTIONS.interests,  LIMITS.interests);
+    initMultiSelect('occasions',  OPTIONS.occasions,  LIMITS.occasions);
+    initMultiSelect('gender',     OPTIONS.gender);
+    initMultiSelect('relationship', OPTIONS.relationship);
+    initMultiSelect('vibe',       OPTIONS.vibe,       LIMITS.vibe);
+    initMultiSelect('traits',     OPTIONS.traits,     LIMITS.traits);
+
+    if (categorization) applyCategorizationToForm(categorization);
+
+    document.getElementById('editForm').onsubmit = saveProduct;
+}
+
+function applyCategorizationToForm(cat) {
+    setMultiSelectValues('categories', cat.categories || []);
+    setMultiSelectValues('interests',  cat.interests  || []);
+    setMultiSelectValues('occasions',  cat.occasions  || []);
+    setMultiSelectValues('gender',     cat.recipient?.gender       || []);
+    setMultiSelectValues('relationship', cat.recipient?.relationship || []);
+    setMultiSelectValues('vibe',       cat.vibe       || []);
+    setMultiSelectValues('traits',     cat.personality_traits || []);
+    if (cat.experience_level) document.getElementById('experienceLevel').value = cat.experience_level;
+}
+
+function initMultiSelect(fieldName, options, maxLimit = null) {
+    const container = document.getElementById(`${fieldName}Container`);
+    container.innerHTML = '';
+    options.forEach(option => {
+        const div = document.createElement('div');
+        div.className = 'checkbox-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `${fieldName}_${option}`;
+        checkbox.value = option;
+        checkbox.onchange = () => { if (maxLimit) updateLimitIndicator(fieldName, maxLimit); };
+        const label = document.createElement('label');
+        label.htmlFor = `${fieldName}_${option}`;
+        label.textContent = OPTION_LABELS[option] || option;
+        div.appendChild(checkbox);
+        div.appendChild(label);
+        container.appendChild(div);
+    });
+    if (maxLimit) updateLimitIndicator(fieldName, maxLimit);
+}
+
+function setMultiSelectValues(fieldName, values) {
+    if (!values) return;
+    values.forEach(value => {
+        const cb = document.getElementById(`${fieldName}_${value}`);
+        if (cb) cb.checked = true;
+    });
+    if (LIMITS[fieldName]) updateLimitIndicator(fieldName, LIMITS[fieldName]);
+}
+
+function getMultiSelectValues(fieldName) {
+    const container = document.getElementById(`${fieldName}Container`);
+    return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+}
+
+function updateLimitIndicator(fieldName, maxLimit) {
+    const count = getMultiSelectValues(fieldName).length;
+    const indicator = document.getElementById(`${fieldName}Limit`);
+    if (!indicator) return;
+    indicator.textContent = `${count}/${maxLimit} selected`;
+    indicator.classList.remove('warning', 'error');
+    const container = document.getElementById(`${fieldName}Container`);
+    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    if (count >= maxLimit) {
+        indicator.classList.add('warning');
+        checkboxes.forEach(cb => { if (!cb.checked) cb.disabled = true; });
+    } else {
+        checkboxes.forEach(cb => { cb.disabled = false; });
+    }
+}
+
+// ── Save Product ────────────────────────────────────────────────────────────
+
+async function saveProduct(event) {
+    event.preventDefault();
+
+    for (const [field, limit] of Object.entries(LIMITS)) {
+        if (getMultiSelectValues(field).length > limit) {
+            showAlert(`${field} cannot have more than ${limit} items`, 'error');
+            return;
+        }
+    }
+
+    showLoading('saveLoading', true);
+    document.getElementById('saveBtn').disabled = true;
+
+    try {
+        const ratingVal = document.getElementById('rating').value;
+        const reviewVal = document.getElementById('reviewCount').value;
+
+        const product = {
+            name:              document.getElementById('productName').value,
+            display_name:      document.getElementById('displayName').value || null,
+            description:       document.getElementById('description').value,
+            brand:             document.getElementById('brand').value,
+            price:             parseFloat(document.getElementById('price').value),
+            currency:          document.getElementById('currency').value,
+            link:              document.getElementById('link').value,
+            image_url:         document.getElementById('imageUrl').value,
+            source:            document.getElementById('source').value,
+            categories:        getMultiSelectValues('categories'),
+            interests:         getMultiSelectValues('interests'),
+            occasions:         getMultiSelectValues('occasions'),
+            vibe:              getMultiSelectValues('vibe'),
+            personality_traits: getMultiSelectValues('traits'),
+            recipient: {
+                gender:       getMultiSelectValues('gender'),
+                relationship: getMultiSelectValues('relationship')
+            },
+            experience_level:  document.getElementById('experienceLevel').value,
+            rating:            ratingVal ? parseFloat(ratingVal) : (currentProduct?.rating || null),
+            review_count:      reviewVal ? parseInt(reviewVal) : (currentProduct?.review_count || 0),
+            in_stock:          document.getElementById('inStock').checked
+        };
+
+        const saved = await apiRequest('/products', 'POST', { product, created_by: 'admin' });
+        showAlert(`Product saved successfully! ID: ${saved.id}`, 'success');
+        setTimeout(() => resetForm(), 2000);
+
+    } catch (error) {
+        showAlert(`Save error: ${error.message}`, 'error');
+    } finally {
+        showLoading('saveLoading', false);
+        document.getElementById('saveBtn').disabled = false;
+    }
+}
+
+function resetForm() {
+    currentProduct = null;
+    isManualEntry = false;
+    document.getElementById('amazonUrl').value = '';
+    document.getElementById('productPreview').style.display = 'none';
+    document.getElementById('categorizationSection').style.display = 'none';
+    document.getElementById('productForm').style.display = 'none';
+    document.getElementById('modeBadge').style.display = 'none';
+    document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (!API_KEY) showAlert('No API key provided - some features may not work', 'warning');
+});
+    </script>
 </body>
 </html>
