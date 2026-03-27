@@ -190,8 +190,14 @@ async def create_manual_product_endpoint(
         embedding_text = create_gift_text_for_embedding(gift_temp)
         embedding = generate_embedding(embedding_text)
 
+        # Generate a sequential gift ID (table has no auto-increment default)
+        from app.admin_products import get_next_gift_id
+        gift_id = get_next_gift_id()
+        logger.info("Generated gift ID: %s" % gift_id)
+
         # Build the full record — matching the existing gifts table schema
         record = {
+            'id': gift_id,
             'name': request.name,
             'display_name': display_name,
             'description': request.description,
