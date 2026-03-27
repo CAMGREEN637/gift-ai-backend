@@ -131,7 +131,7 @@ async def fetch_amazon_product_endpoint(
             'price': product_data.get('price', 0.0),
             'description': product_data.get('description', ''),
             'image_url': product_data.get('image_url'),
-            'product_url': product_data.get('product_url'),
+            'link': product_data.get('product_url') or product_data.get('link'),
             'source': 'amazon',
             'shipping_min_days': 5,
             'shipping_max_days': 8,
@@ -198,7 +198,7 @@ async def create_manual_product_endpoint(
             'brand': request.brand,
             'price': request.price,
             'currency': request.currency,
-            'product_url': request.link,        # JS sends 'link', DB column is 'product_url'
+            'link': request.link,
             'image_url': request.image_url,
             'source': request.source,
             'categories': request.categories,
