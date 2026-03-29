@@ -1,5 +1,3 @@
-# app/llm.py
-
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
@@ -114,7 +112,7 @@ def generate_gift_response(
     if not gifts:
         recipient = partner_context.get("name") if partner_context else "them"
         return {
-            "intro": "I couldn't find any perfect matches for %s. Try adjusting your search!" % recipient,
+            "intro": f"I couldn't find any perfect matches for {recipient}. Try adjusting your search!",
             "gifts": []
         }, 0
 
@@ -127,30 +125,35 @@ def generate_gift_response(
     occasion = session_context.get("occasion") if session_context else None
     budget = session_context.get("budget") if session_context else None
 
+    # --- DYNAMIC PROMPT LOGIC ---
+    # We adapt the instructions based on whether we have a name, a relationship, or neither.
     if recipient_name:
         recipient_display = recipient_name
+        naming_rule = f'2. USE THEIR NAME NATURALLY: Always use "{recipient_name}". NEVER use "the recipient" or "the user".'
+        intro_schema = f'One warm, natural sentence mentioning {recipient_name} and the occasion'
+        reason_schema = f'Unique 2-3 sentence explanation detailing why {recipient_name} will love this specific product.'
+    elif relationship:
+        recipient_display = f"your {relationship}"
+        naming_rule = f'2. REFERENCE THE RELATIONSHIP: Refer to them naturally as "your {relationship}". NEVER use "the recipient" or "the user".'
+        intro_schema = f'One warm, natural sentence mentioning your {relationship} and the occasion'
+        reason_schema = f'Unique 2-3 sentence explanation detailing why your {relationship} will love this specific product.'
     else:
-        recipient_display = "your %s" % relationship if relationship else "them"
+        recipient_display = "them"
+        naming_rule = '2. WRITE NATURALLY: Address the gift to the person they are shopping for using natural pronouns (they/them). NEVER use robotic placeholders like "the recipient" or "the user".'
+        intro_schema = 'One warm, natural sentence introducing the gifts for the occasion'
+        reason_schema = 'Unique 2-3 sentence explanation detailing why they will love this specific product.'
 
-    context_text = """
-RECIPIENT: %s
-RELATIONSHIP: %s
-OCCASION: %s
-BUDGET: %s
+    context_text = f"""
+RECIPIENT: {recipient_name or "Not specified"}
+RELATIONSHIP: {relationship or "Not specified"}
+OCCASION: {occasion or "General gift"}
+BUDGET: {"$" + str(budget) if budget else "Flexible"}
 
 RECIPIENT PROFILE:
-- Interests: %s
-- Style/Vibe: %s
-- Personality: %s
-""" % (
-        recipient_name or "Not specified",
-        relationship or "Not specified",
-        occasion or "General gift",
-        "$%s" % budget if budget else "Flexible",
-        ", ".join(partner_interests[:5]) if partner_interests else "Not specified",
-        ", ".join(partner_vibe[:3]) if partner_vibe else "Not specified",
-        ", ".join(partner_personality[:3]) if partner_personality else "Not specified"
-    )
+- Interests: {", ".join(partner_interests[:5]) if partner_interests else "Not specified"}
+- Style/Vibe: {", ".join(partner_vibe[:3]) if partner_vibe else "Not specified"}
+- Personality: {", ".join(partner_personality[:3]) if partner_personality else "Not specified"}
+"""
 
     gift_context = ""
     for i, gift in enumerate(gifts, 1):
@@ -160,45 +163,46 @@ RECIPIENT PROFILE:
         desc = gift.get('description', '')[:200]
         price = gift.get('price', 0)
 
-        gift_context += """
-GIFT #%d:
-Name: %s
-Price: $%.2f
-Confidence: %.0f%%
-Why It Ranked High: %s
-Description: %s
+        gift_context += f"""
+GIFT #{i}:
+Name: {name}
+Price: ${price:.2f}
+Confidence: {conf:.0f}%
+Why It Ranked High: {reasons}
+Description: {desc}
 ---
-""" % (i, name, price, conf, reasons, desc)
+"""
 
-    system_prompt = """
-You are an expert gift consultant helping someone choose a meaningful gift for %s.
-%s
+    system_prompt = f"""
+You are an expert gift consultant helping someone choose a meaningful gift for {recipient_display}.
+{context_text}
 RULES:
 1. UNIQUENESS IS MANDATORY: Each explanation must be completely different. Never reuse phrases across gifts.
-2. USE THE RECIPIENT'S NAME: Always mention "%s" in every reason.
-3. Be specific to each product — reference its actual features, not generic praise.
-4. OUTPUT FORMAT: Valid JSON only. Use the exact gift name from the list in your response.
-""" % (recipient_display, context_text, recipient_name or "the recipient")
+{naming_rule}
+3. TONE: Write in a reassuring, conversational, concierge-like tone. Focus on why this is a great match based on their profile.
+4. BE SPECIFIC: Reference actual product features from the description, not generic praise.
+5. OUTPUT FORMAT: Valid JSON only. Use the exact gift name from the list in your response.
+"""
 
-    user_prompt = """
-User's search: "%s"
+    user_prompt = f"""
+User's search: "{query}"
 
 Return a JSON object in this exact format:
-{
-  "intro": "One warm, natural sentence mentioning the recipient and the occasion",
+{{
+  "intro": "{intro_schema}",
   "gifts": [
-    {
+    {{
       "name": "use the EXACT gift name from the list below",
-      "reason": "Unique 2-3 sentence explanation referencing the specific product and recipient"
-    }
+      "reason": "{reason_schema}"
+    }}
   ]
-}
+}}
 
 You MUST include a reason for every gift in the list. Use the exact name as given.
 
 Gifts:
-%s
-""" % (query, gift_context)
+{gift_context}
+"""
 
     try:
         response = client.chat.completions.create(
@@ -217,8 +221,8 @@ Gifts:
         logger.info(f"LLM returned reasons for {len(parsed.get('gifts', []))} gifts")
 
     except Exception as e:
-        logger.error("LLM Generation failed: %s" % str(e))
-        parsed = {"intro": "Here are some gifts for %s:" % recipient_display, "gifts": []}
+        logger.error(f"LLM Generation failed: {str(e)}")
+        parsed = {"intro": f"Here are some gifts for {recipient_display}:", "gifts": []}
         tokens_used = 0
 
     llm_gifts = parsed.get("gifts", [])

@@ -4,6 +4,28 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gift AI - Admin Product Management</title>
+    <!-- Block the old external admin.js from overwriting inline functions -->
+    <script>
+    // Intercept and neutralize the old /static/admin.js if it still exists on the server
+    const _origCreateElement = document.createElement.bind(document);
+    document.createElement = function(tag) {
+        const el = _origCreateElement(tag);
+        if (tag.toLowerCase() === 'script') {
+            const _origSetSrc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+            Object.defineProperty(el, 'src', {
+                set(val) {
+                    if (val && val.includes('admin.js')) {
+                        console.warn('Blocked old admin.js from loading:', val);
+                        return;
+                    }
+                    _origSetSrc.set.call(this, val);
+                },
+                get() { return _origSetSrc.get.call(this); }
+            });
+        }
+        return el;
+    };
+    </script>
     <style>
         * {
             margin: 0;
@@ -549,6 +571,8 @@
 
     <script>
 // Admin Dashboard JavaScript
+// NOTE: All functions defined here override any external admin.js definitions.
+// If /static/admin.js is still on your server, delete it to avoid conflicts.
 
 const API_BASE = '/admin/api';
 const API_KEY = prompt('Enter Admin API Key:') || '';
@@ -558,7 +582,7 @@ let isManualEntry = false;
 
 const OPTIONS = {
     categories: ["tech", "home", "kitchen", "fashion", "beauty", "fitness", "outdoors", "hobby", "book", "experiences"],
-    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "tea", "fashion", "skincare", "makeup"],
+    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "tea", "fashion", "skincare", "makeup", "pets"],
     occasions: ["birthday", "anniversary", "valentines", "mothers_day", "holiday", "christmas", "wedding", "engagement", "graduation", "just_because"],
     gender: ["male", "female", "unisex"],
     relationship: ["partner", "spouse", "boyfriend", "girlfriend", "friend", "family"],
@@ -610,8 +634,13 @@ async function fetchAmazonProduct() {
         currentProduct = response.product || response;
         isManualEntry = false;
         displayProductPreview(currentProduct);
+
+        // Populate and show the form immediately so checkboxes exist before AI categorization runs
+        populateProductForm(currentProduct, null);
+        document.getElementById('productForm').style.display = 'block';
         document.getElementById('categorizationSection').style.display = 'block';
-        showAlert('Product fetched successfully!', 'success');
+
+        showAlert('Product fetched! Click "Suggest Categories with AI" or fill in the tags manually.', 'success');
     } catch (error) {
         showAlert(`Error: ${error.message}`, 'error');
     } finally {
@@ -682,9 +711,10 @@ function addManually() {
 // ── Step 2: AI Categorization ───────────────────────────────────────────────
 
 async function categorizeProduct() {
-    const name = isManualEntry ? document.getElementById('productName').value : currentProduct?.name;
-    const description = isManualEntry ? document.getElementById('description').value : (currentProduct?.description || '');
-    const brand = isManualEntry ? document.getElementById('brand').value : (currentProduct?.brand || '');
+    // Always read from the form — works for both scraped and manual entry
+    const name = document.getElementById('productName').value;
+    const description = document.getElementById('description').value;
+    const brand = document.getElementById('brand').value;
 
     if (!name) { showAlert('Please enter a product name before requesting AI categorization', 'error'); return; }
 
