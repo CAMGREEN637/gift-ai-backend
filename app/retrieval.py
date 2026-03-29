@@ -27,9 +27,9 @@ GENERIC_TOKENS = {
 }
 
 VECTOR_MATCH_THRESHOLD = 0.15
-VECTOR_WEIGHT = 60       # Vector alone can't override explicit interest matches
-INTENT_WEIGHT = 40       # Strong bonus per keyword match in gift text
-SESSION_WEIGHT = 35      # Strong bonus when gift interests overlap with quiz interests
+VECTOR_WEIGHT = 60  # Vector alone can't override explicit interest matches
+INTENT_WEIGHT = 40  # Strong bonus per keyword match in gift text
+SESSION_WEIGHT = 35  # Strong bonus when gift interests overlap with quiz interests
 PROFILE_WEIGHT = 3
 
 DIVERSITY_PENALTY = 20
@@ -40,13 +40,13 @@ MAX_CATEGORY_DOMINANCE = 3
 PRICE_AFFINITY_MAX_BONUS = 25
 
 # Shipping: fast shipping is a tiebreaker, not a primary signal
-SHIPPING_ON_TIME_BONUS = 15   # was 40 — reduced so cheap fast-shipping items don't dominate
+SHIPPING_ON_TIME_BONUS = 15  # reduced so cheap fast-shipping items don't dominate
 SHIPPING_TIGHT_BONUS = 5
 SHIPPING_LATE_PENALTY = -20
 
 # Price floor: exclude gifts priced below this fraction of max_price
-# e.g. 0.10 means an $8 gift won't surface on a $200 budget
-PRICE_FLOOR_RATIO = 0.10
+PRICE_FLOOR_RATIO = 0.08
+PRICE_FLOOR_MAX_BUDGET = 2000  # Don't apply floor above this — likely a sentinel/unlimited value
 
 
 # --------------------------------------------------
@@ -110,17 +110,7 @@ def compute_price_affinity_bonus(
         min_price: Optional[float],
         max_price: Optional[float]
 ) -> float:
-    """
-    Reward gifts that sit in the upper portion of the user's price range.
-    Returns a score bonus between 0 and PRICE_AFFINITY_MAX_BONUS.
-
-    Scoring curve:
-      - Price at or above 75% of the range  → full bonus
-      - Price between 50%-75% of the range  → half bonus
-      - Price below 50% of the range        → no bonus
-      - No range specified                  → no bonus
-    """
-    if max_price is None or price is None:
+    if max_price is None or price is None or price == 0.0:
         return 0.0
 
     effective_min = min_price if min_price is not None else 0.0
@@ -166,16 +156,17 @@ def compute_enhanced_score(
     matched_intent = [t for t in meaningful_intent_tokens if t in gift_text]
     intent_score = len(matched_intent) * INTENT_WEIGHT
 
-    # Interest matching: only score against structured tags (interests + categories),
-    # NOT the free-text description. This prevents "travel" in "great for travel or home use"
-    # from giving the same boost as a gift actually tagged with travel.
     user_interests = [i.lower().strip() for i in preferences.get("interests", []) if i]
+
+    # FIX: Convert the tag blob into a set of exact words to prevent partial matches
     gift_tag_blob = " ".join(g_interests + g_categories).lower()
+    gift_tag_tokens = set(gift_tag_blob.split())
 
     broad_interest_matches = set()
     for interest in user_interests:
         for token in interest.split():
-            if len(token) > 2 and token in gift_tag_blob:
+            # Now requires an exact token match rather than a substring match
+            if len(token) > 2 and token in gift_tag_tokens:
                 broad_interest_matches.add(interest)
                 break
 
@@ -223,14 +214,6 @@ def compute_confidence(vector_similarity: float, intent_match_count: int):
 
 
 def assign_ranked_confidence(results: List[Dict]) -> List[Dict]:
-    """
-    Re-assigns confidence scores based on final rank:
-      - Rank 1  → 0.90
-      - Rank 2  → 0.88
-      - Rank 3  → 0.86
-      - Rank 4+ → drops 0.02 per position, floor at 0.65
-    Takes the higher of rank-based and signal-derived values.
-    """
     for i, gift in enumerate(results):
         rank_confidence = max(0.65, round(0.90 - (i * 0.02), 2))
         gift["confidence"] = max(rank_confidence, gift.get("confidence", 0))
@@ -252,7 +235,6 @@ def retrieve_gifts(
         partner_profile: Optional[Dict] = None,
         partner_gift_history: Optional[List[str]] = None,
 ) -> List[Dict]:
-
     preferences = normalize_preferences(preferences)
     meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
     partner_gift_history = partner_gift_history or []
@@ -284,7 +266,6 @@ def retrieve_gifts(
     scored = []
 
     for g in raw_gifts:
-        # 1. Clean Data First
         g["interests"] = normalize_jsonb_to_list(g.get("interests"))
         g["categories"] = normalize_jsonb_to_list(g.get("categories"))
         g["vibe"] = normalize_jsonb_to_list(g.get("vibe"))
@@ -295,22 +276,24 @@ def retrieve_gifts(
 
         g["product_url"] = g.get("link") or g.get("product_url")
 
-        # 2. Hard Filters: Price ceiling and price floor
+        # FIX: Ensure missing prices aren't evaluated as $0 against the floor filter
         try:
-            current_price = float(g.get("price", 0))
+            raw_price = g.get("price")
+            current_price = float(raw_price) if raw_price is not None else 0.0
         except (ValueError, TypeError):
             current_price = 0.0
 
         if max_price is not None and current_price > max_price:
             continue
 
-        # Exclude gifts that are implausibly cheap for the stated budget.
-        # e.g. an $8 gift won't appear on a $200 budget (floor = $20).
-        if max_price is not None and current_price < max_price * PRICE_FLOOR_RATIO:
-            logger.debug(f"Filtered out '{g.get('name')}' — price ${current_price:.2f} below floor for budget ${max_price}")
+        # FIX: Added `current_price > 0` so items without prices aren't blocked by the floor
+        if (max_price is not None
+                and max_price <= PRICE_FLOOR_MAX_BUDGET
+                and current_price > 0
+                and current_price < max_price * PRICE_FLOOR_RATIO):
+            logger.debug(f"Filtered out '{g.get('name')}' — price ${current_price:.2f} below floor")
             continue
 
-        # 3. Calculate Scores
         vec_sim = g.get("similarity", 0)
         vector_score = vec_sim * VECTOR_WEIGHT
 
@@ -321,7 +304,6 @@ def retrieve_gifts(
 
         novelty_score = NOVELTY_BOOST if str(g.get("id")) not in [str(id) for id in partner_gift_history] else 0
 
-        # 4. Price affinity bonus — rewards gifts near the top of the user's range
         try:
             price_affinity = compute_price_affinity_bonus(
                 price=current_price,
@@ -331,7 +313,6 @@ def retrieve_gifts(
         except (ValueError, TypeError):
             price_affinity = 0.0
 
-        # 5. Shipping Logic — tiebreaker only, not a primary ranking signal
         on_time_bonus = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
@@ -346,10 +327,15 @@ def retrieve_gifts(
                 on_time_bonus = SHIPPING_LATE_PENALTY
                 delivery_status = "late"
 
-        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + price_affinity
+        has_relevance = (
+                score_data["intent_match_count"] > 0
+                or len(score_data["broad_interest_matches"]) > 0
+        )
+        gated_price_affinity = price_affinity if has_relevance else 0.0
+
+        final_score = vector_score + score_data["total_boost"] + novelty_score + on_time_bonus + gated_price_affinity
         confidence = compute_confidence(vec_sim, score_data["intent_match_count"])
 
-        # 6. Generate User-Facing Reasons
         reasons = []
         if score_data["matched_intent"]:
             reasons.append(f"Matches: {', '.join(score_data['matched_intent'][:2])}")
@@ -377,13 +363,13 @@ def retrieve_gifts(
         for cat in cats:
             if category_counter[cat] >= MAX_CATEGORY_DOMINANCE:
                 gift["score"] -= DIVERSITY_PENALTY
+                break  # FIX: Ensure it only gets penalized once per gift
             category_counter[cat] += 1
 
     # Final Sort
     scored.sort(key=lambda x: x["score"], reverse=True)
     final_results = scored[:k]
 
-    # Re-assign confidence based on final rank so scores vary meaningfully
     final_results = assign_ranked_confidence(final_results)
 
     logger.info(f"Final Selection: {[f.get('display_name') for f in final_results]}")
