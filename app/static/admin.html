@@ -606,10 +606,10 @@ async function fetchAmazonProduct() {
     document.getElementById('fetchBtn').disabled = true;
 
     try {
-        const product = await apiRequest('/fetch-amazon', 'POST', { url });
-        currentProduct = product;
+        const response = await apiRequest('/fetch-amazon', 'POST', { url });
+        currentProduct = response.product || response;
         isManualEntry = false;
-        displayProductPreview(product);
+        displayProductPreview(currentProduct);
         document.getElementById('categorizationSection').style.display = 'block';
         showAlert('Product fetched successfully!', 'success');
     } catch (error) {
@@ -715,9 +715,9 @@ function populateProductForm(product, categorization) {
     document.getElementById('link').value           = product?.link || product?.product_url || '';
     document.getElementById('imageUrl').value       = product?.image_url || '';
     document.getElementById('source').value         = product?.source || 'amazon';
-    document.getElementById('rating').value         = product?.rating || '';
-    document.getElementById('reviewCount').value    = product?.review_count || '';
-    document.getElementById('inStock').checked      = product?.in_stock !== false;
+    document.getElementById('rating').value         = product?.rating ?? '';
+    document.getElementById('reviewCount').value    = product?.review_count ?? '';
+    document.getElementById('inStock').checked      = product?.in_stock !== false && product?.in_stock !== 0;
 
     if (!isManualEntry && product) {
         document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
