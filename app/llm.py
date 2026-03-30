@@ -1,5 +1,6 @@
 from openai import OpenAI
 import os
+import time
 from dotenv import load_dotenv
 from typing import List, Dict, Optional
 import json
@@ -155,56 +156,33 @@ RECIPIENT PROFILE:
 - Personality: {", ".join(partner_personality[:3]) if partner_personality else "Not specified"}
 """
 
+    # Build compact gift list — trim description to 100 chars, drop fields the LLM doesn't need
     gift_context = ""
     for i, gift in enumerate(gifts, 1):
-        reasons = ", ".join(gift.get('ranking_reasons', []))
         name = gift.get('name', '')
-        conf = gift.get('confidence', 0) * 100
-        desc = gift.get('description', '')[:200]
+        desc = gift.get('description', '')[:100]
         price = gift.get('price', 0)
+        gift_context += f"{i}. {name} (${price:.2f}): {desc}\n"
 
-        gift_context += f"""
-GIFT #{i}:
-Name: {name}
-Price: ${price:.2f}
-Confidence: {conf:.0f}%
-Why It Ranked High: {reasons}
-Description: {desc}
----
-"""
+    system_prompt = (
+        f"You are a gift consultant. Help choose gifts for {recipient_display}.\n"
+        f"{context_text}\n"
+        f"RULES: 1) Each reason must be unique — never reuse phrases. "
+        f"{naming_rule} "
+        f"3) Be specific — reference actual product features. "
+        f"4) Conversational, warm tone. 5) Return valid JSON only."
+    )
 
-    system_prompt = f"""
-You are an expert gift consultant helping someone choose a meaningful gift for {recipient_display}.
-{context_text}
-RULES:
-1. UNIQUENESS IS MANDATORY: Each explanation must be completely different. Never reuse phrases across gifts.
-{naming_rule}
-3. TONE: Write in a reassuring, conversational, concierge-like tone. Focus on why this is a great match based on their profile.
-4. BE SPECIFIC: Reference actual product features from the description, not generic praise.
-5. OUTPUT FORMAT: Valid JSON only. Use the exact gift name from the list in your response.
-"""
-
-    user_prompt = f"""
-User's search: "{query}"
-
-Return a JSON object in this exact format:
-{{
-  "intro": "{intro_schema}",
-  "gifts": [
-    {{
-      "name": "use the EXACT gift name from the list below",
-      "reason": "{reason_schema}"
-    }}
-  ]
-}}
-
-You MUST include a reason for every gift in the list. Use the exact name as given.
-
-Gifts:
-{gift_context}
-"""
+    user_prompt = (
+        f'Search: "{query}"\n\n'
+        f'Return JSON:\n'
+        f'{{"intro": "{intro_schema}", "gifts": [{{"name": "<exact name from list>", "reason": "{reason_schema}"}}]}}\n\n'
+        f'Include a reason for EVERY gift. Use the EXACT name as given.\n\n'
+        f'Gifts:\n{gift_context}'
+    )
 
     try:
+        t_llm = time.time()
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -212,8 +190,10 @@ Gifts:
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.7
+            temperature=0.7,
+            max_tokens=700,  # Caps output — 10 gifts × ~60 tokens/reason + intro fits well under this
         )
+        logger.info(f"[PERF] LLM call: {(time.time() - t_llm)*1000:.0f}ms")
 
         tokens_used = response.usage.total_tokens if response.usage else 0
         content = response.choices[0].message.content.strip()

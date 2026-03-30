@@ -1,6 +1,8 @@
 # app/main.py
 
 import os
+import asyncio
+import time
 from typing import Optional, List
 from pathlib import Path
 from datetime import datetime
@@ -136,7 +138,7 @@ def submit_feedback(feedback: GiftFeedback):
 
 # Recommendation Endpoint
 @app.get("/recommend")
-def recommend(
+async def recommend(
         query: str,
         user_id: Optional[str] = None,
         partner_id: Optional[str] = None,
@@ -150,14 +152,40 @@ def recommend(
         db: Client = Depends(get_db),
         ip_address: str = Depends(check_rate_limit_dependency)
 ):
+    t_total = time.time()
     logger.info("Recommendation request: query=%s, partner_id=%s, partner_name=%s, occasion=%s, relationship=%s, interests=%s" % (
         query, partner_id, partner_name, occasion, relationship, interests
     ))
 
-    # Load session preferences
-    explicit = get_preferences(user_id) if user_id else None
-    explicit = explicit or {"interests": [], "vibe": []}
-    inferred = get_inferred(user_id) if user_id else {"interests": {}, "vibe": {}}
+    # --- PARALLEL: fetch user preferences + recipient profile simultaneously ---
+    # These are independent DB reads that previously ran sequentially before retrieve_gifts().
+    t_db = time.time()
+
+    async def _fetch_preferences():
+        return await asyncio.to_thread(get_preferences, user_id) if user_id else None
+
+    async def _fetch_inferred():
+        return await asyncio.to_thread(get_inferred, user_id) if user_id else {"interests": {}, "vibe": {}}
+
+    async def _fetch_recipient_profile():
+        if not (partner_id and user_id):
+            return None
+        try:
+            return await asyncio.to_thread(
+                lambda: db.table('user_profiles').select('saved_recipients').eq('user_id', user_id).single().execute()
+            )
+        except Exception as e:
+            logger.error("Failed to load recipient: %s" % str(e))
+            return None
+
+    explicit_raw, inferred, profile_response = await asyncio.gather(
+        _fetch_preferences(),
+        _fetch_inferred(),
+        _fetch_recipient_profile(),
+    )
+    logger.info(f"[PERF] Parallel DB reads: {(time.time() - t_db)*1000:.0f}ms")
+
+    explicit = explicit_raw or {"interests": [], "vibe": []}
 
     merged_preferences = {
         "interests": list(set(
@@ -173,37 +201,25 @@ def recommend(
 
     logger.info("Merged preferences: %s" % merged_preferences)
 
-    # Load recipient profile from user_profiles
+    # Resolve recipient profile from parallel fetch result
     recipient_profile = None
     partner_context = None
-
-    # Kept for compatibility with the retrieve_gifts call below
     partner_profile = None
     partner_gift_history = []
 
-    if partner_id and user_id:
-        try:
-            # Get user's profile
-            profile_response = db.table('user_profiles').select('saved_recipients').eq('user_id',
-                                                                                       user_id).single().execute()
-
-            if profile_response.data:
-                saved_recipients = profile_response.data.get('saved_recipients', [])
-                # Find the specific recipient
-                recipient = next((r for r in saved_recipients if r.get('id') == partner_id), None)
-
-                if recipient:
-                    logger.info("Loaded recipient: %s" % recipient.get('name'))
-                    recipient_profile = recipient
-                    partner_profile = recipient  # Pass this to retrieve_gifts
-                    partner_context = {
-                        "name": recipient.get("name"),
-                        "interests": recipient.get("interests", []),
-                        "vibe": recipient.get("vibe", []),
-                        "personality": recipient.get("personality_traits", []),
-                    }
-        except Exception as e:
-            logger.error("Failed to load recipient: %s" % str(e))
+    if profile_response and profile_response.data:
+        saved_recipients = profile_response.data.get('saved_recipients', [])
+        recipient = next((r for r in saved_recipients if r.get('id') == partner_id), None)
+        if recipient:
+            logger.info("Loaded recipient: %s" % recipient.get('name'))
+            recipient_profile = recipient
+            partner_profile = recipient
+            partner_context = {
+                "name": recipient.get("name"),
+                "interests": recipient.get("interests", []),
+                "vibe": recipient.get("vibe", []),
+                "personality": recipient.get("personality_traits", []),
+            }
 
     # If no partner_id but we have a partner_name from the quiz, use it
     if not partner_context and partner_name:
@@ -215,17 +231,21 @@ def recommend(
             "personality": []
         }
 
-    # Retrieve gifts with clean separation
-    gifts = retrieve_gifts(
-        query=query,
-        user_id=user_id,
-        min_price=min_price,
-        max_price=max_price,
-        days_until_needed=days_until_needed,
-        preferences=merged_preferences,
-        partner_profile=partner_profile,
-        partner_gift_history=partner_gift_history,
+    # Retrieve gifts — runs embedding + vector search + scoring
+    t_retrieval = time.time()
+    gifts = await asyncio.to_thread(
+        retrieve_gifts,
+        query,
+        user_id,
+        10,         # k
+        min_price,
+        max_price,
+        days_until_needed,
+        merged_preferences,
+        partner_profile,
+        partner_gift_history,
     )
+    logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
     # --- CONFIDENCE THRESHOLD FILTER ---
     # Only keep gifts that have a match confidence of 80% or higher (0.8+)
@@ -242,14 +262,17 @@ def recommend(
         "days_until_needed": days_until_needed
     }
 
-    # Generate response with rich context
-    llm_response, tokens_used = generate_gift_response(
-        query=query,
-        gifts=gifts,
-        preferences=merged_preferences,
-        partner_context=partner_context,
-        session_context=session_context
+    # Generate response — single batched LLM call for all gift reasons
+    t_llm = time.time()
+    llm_response, tokens_used = await asyncio.to_thread(
+        generate_gift_response,
+        query,
+        gifts,
+        merged_preferences,
+        partner_context,
+        session_context,
     )
+    logger.info(f"[PERF] generate_gift_response: {(time.time() - t_llm)*1000:.0f}ms")
 
     # Record token usage
     try:
@@ -264,6 +287,7 @@ def recommend(
     except Exception as e:
         logger.error("Failed to record token usage: %s" % str(e))
 
+    logger.info(f"[PERF] Total /recommend: {(time.time() - t_total)*1000:.0f}ms")
     return llm_response
 
 

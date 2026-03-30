@@ -3,6 +3,7 @@ import logging
 import traceback
 import re
 import json
+import time
 from typing import List, Dict, Optional, Set
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -12,6 +13,9 @@ from app.persistence import get_feedback
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+# Module-level singleton — avoids recreating the client (and its HTTP session) on every request
+_supabase_client = None
 
 # --------------------------------------------------
 # CONFIG
@@ -51,12 +55,16 @@ PRICE_FLOOR_MAX_BUDGET = 2000
 # --------------------------------------------------
 
 def get_supabase_client():
-    from supabase import create_client
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        raise Exception("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
-    return create_client(url, key)
+    global _supabase_client
+    if _supabase_client is None:
+        from supabase import create_client
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            raise Exception("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
+        _supabase_client = create_client(url, key)
+        logger.info("Supabase client initialized (singleton)")
+    return _supabase_client
 
 
 def tokenize(text: str) -> Set[str]:
@@ -247,11 +255,15 @@ def retrieve_gifts(
 
     try:
         supabase = get_supabase_client()
+
+        t_embed = time.time()
         embedding = generate_embedding(query)
+        logger.info(f"[PERF] Embedding: {(time.time() - t_embed)*1000:.0f}ms (cache_info={generate_embedding.__wrapped__.__name__ if hasattr(generate_embedding, '__wrapped__') else 'n/a'})")
         if not embedding or len(embedding) == 0:
             logger.error("Embedding generation returned empty result.")
             return []
 
+        t_search = time.time()
         response = supabase.rpc(
             "match_gifts",
             {
@@ -260,6 +272,7 @@ def retrieve_gifts(
                 "match_count": 80
             }
         ).execute()
+        logger.info(f"[PERF] Vector search: {(time.time() - t_search)*1000:.0f}ms")
 
         raw_gifts = response.data or []
         logger.info(f"Retrieved {len(raw_gifts)} candidates from vector search")
