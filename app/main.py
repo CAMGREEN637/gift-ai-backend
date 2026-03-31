@@ -9,7 +9,8 @@ from datetime import datetime
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+import json
 from fastapi.staticfiles import StaticFiles
 import httpx
 import logging
@@ -149,6 +150,7 @@ async def recommend(
         occasion: Optional[str] = None,
         relationship: Optional[str] = None,
         interests: List[str] = Query(default=[]),  # Quiz interests passed directly
+        stream: bool = Query(default=False),        # Set ?stream=true for SSE streaming
         db: Client = Depends(get_db),
         ip_address: str = Depends(check_rate_limit_dependency)
 ):
@@ -262,33 +264,96 @@ async def recommend(
         "days_until_needed": days_until_needed
     }
 
-    # Generate response — single batched LLM call for all gift reasons
-    t_llm = time.time()
-    llm_response, tokens_used = await asyncio.to_thread(
-        generate_gift_response,
-        query,
-        gifts,
-        merged_preferences,
-        partner_context,
-        session_context,
-    )
-    logger.info(f"[PERF] generate_gift_response: {(time.time() - t_llm)*1000:.0f}ms")
-
-    # Record token usage
-    try:
-        record_token_usage(
-            client=db,
-            ip_address=ip_address,
-            tokens=tokens_used,
-            model="gpt-4o-mini",
-            endpoint="/recommend"
+    if not stream:
+        # --- NON-STREAMING: original single-response behavior ---
+        t_llm = time.time()
+        llm_response, tokens_used = await asyncio.to_thread(
+            generate_gift_response,
+            query,
+            gifts,
+            merged_preferences,
+            partner_context,
+            session_context,
         )
-        logger.info("Recorded %d tokens for IP: %s" % (tokens_used, ip_address))
-    except Exception as e:
-        logger.error("Failed to record token usage: %s" % str(e))
+        logger.info(f"[PERF] generate_gift_response: {(time.time() - t_llm)*1000:.0f}ms")
 
-    logger.info(f"[PERF] Total /recommend: {(time.time() - t_total)*1000:.0f}ms")
-    return llm_response
+        try:
+            record_token_usage(
+                client=db,
+                ip_address=ip_address,
+                tokens=tokens_used,
+                model="gpt-4o-mini",
+                endpoint="/recommend"
+            )
+            logger.info("Recorded %d tokens for IP: %s" % (tokens_used, ip_address))
+        except Exception as e:
+            logger.error("Failed to record token usage: %s" % str(e))
+
+        logger.info(f"[PERF] Total /recommend: {(time.time() - t_total)*1000:.0f}ms")
+        return llm_response
+
+    # --- STREAMING: SSE mode (?stream=true) ---
+    # Captures all local variables via closure; runs as an async generator.
+    async def event_stream():
+        # EVENT 1 — top 3 gifts sent immediately after retrieval (~500-800ms from request start).
+        # Frontend can render cards right away while the LLM runs in the background.
+        preview_gifts = [
+            {
+                "name": g.get("name"),
+                "display_name": g.get("display_name"),
+                "price": g.get("price"),
+                "confidence": g.get("confidence"),
+                "image_url": g.get("image_url"),
+                "product_url": g.get("product_url") or g.get("link", ""),
+                "shipping_min_days": g.get("shipping_min_days"),
+                "shipping_max_days": g.get("shipping_max_days"),
+                "is_prime_eligible": g.get("is_prime_eligible"),
+                "already_purchased": g.get("already_purchased", False),
+            }
+            for g in gifts[:3]
+        ]
+        logger.info(f"[STREAM] Sending preview with {len(preview_gifts)} gifts at {(time.time() - t_total)*1000:.0f}ms")
+        yield f"data: {json.dumps({'type': 'preview', 'gifts': preview_gifts})}\n\n"
+
+        # EVENT 2 — full result with LLM-generated reasons for all gifts.
+        t_llm = time.time()
+        llm_response, tokens_used = await asyncio.to_thread(
+            generate_gift_response,
+            query,
+            gifts,
+            merged_preferences,
+            partner_context,
+            session_context,
+        )
+        logger.info(f"[PERF] generate_gift_response (stream): {(time.time() - t_llm)*1000:.0f}ms")
+
+        yield f"data: {json.dumps({'type': 'result', **llm_response})}\n\n"
+
+        # Sentinel so the client knows the stream is complete
+        yield "data: [DONE]\n\n"
+
+        logger.info(f"[PERF] Total /recommend (stream): {(time.time() - t_total)*1000:.0f}ms")
+
+        try:
+            record_token_usage(
+                client=db,
+                ip_address=ip_address,
+                tokens=tokens_used,
+                model="gpt-4o-mini",
+                endpoint="/recommend"
+            )
+        except Exception as e:
+            logger.error("Failed to record token usage: %s" % str(e))
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # Disables Nginx buffering so events reach the client instantly
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 # Admin endpoints
