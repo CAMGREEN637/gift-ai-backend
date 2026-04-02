@@ -507,52 +507,36 @@
                     <!-- Right Column -->
                     <div>
                         <div class="form-group">
-                            <label>Categories (Max 2)</label>
-                            <div class="multi-select-container" id="categoriesContainer"></div>
-                            <div id="categoriesLimit" class="limit-indicator">0/2 selected</div>
+                            <label>Gift Type (Max 2)</label>
+                            <div class="multi-select-container" id="gift_typeContainer"></div>
+                            <div id="gift_typeLimit" class="limit-indicator">0/2 selected</div>
                         </div>
 
                         <div class="form-group">
-                            <label>Interests (Max 5)</label>
+                            <label>Interests (Max 8)</label>
                             <div class="multi-select-container" id="interestsContainer"></div>
-                            <div id="interestsLimit" class="limit-indicator">0/5 selected</div>
+                            <div id="interestsLimit" class="limit-indicator">0/8 selected</div>
                         </div>
 
                         <div class="form-group">
-                            <label>Occasions (Max 4)</label>
+                            <label>Occasions (Max 6)</label>
                             <div class="multi-select-container" id="occasionsContainer"></div>
-                            <div id="occasionsLimit" class="limit-indicator">0/4 selected</div>
+                            <div id="occasionsLimit" class="limit-indicator">0/6 selected</div>
                         </div>
 
                         <div class="form-group">
-                            <label>Gender</label>
-                            <div class="multi-select-container" id="genderContainer"></div>
-                        </div>
-
-                        <div class="form-group">
-                            <label>Relationship</label>
-                            <div class="multi-select-container" id="relationshipContainer"></div>
+                            <label>Gender Skew</label>
+                            <select id="gender_skew">
+                                <option value="unisex">Unisex</option>
+                                <option value="female">Female</option>
+                                <option value="male">Male</option>
+                            </select>
                         </div>
 
                         <div class="form-group">
                             <label>Vibe (Max 3)</label>
                             <div class="multi-select-container" id="vibeContainer"></div>
                             <div id="vibeLimit" class="limit-indicator">0/3 selected</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label>Personality Traits (Max 3)</label>
-                            <div class="multi-select-container" id="traitsContainer"></div>
-                            <div id="traitsLimit" class="limit-indicator">0/3 selected</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="experienceLevel">Experience Level</label>
-                            <select id="experienceLevel">
-                                <option value="beginner">Beginner</option>
-                                <option value="enthusiast">Enthusiast</option>
-                                <option value="expert">Expert</option>
-                            </select>
                         </div>
                     </div>
                 </div>
@@ -581,18 +565,16 @@ let currentProduct = null;
 let isManualEntry = false;
 
 const OPTIONS = {
-    categories: ["tech", "home", "kitchen", "fashion", "beauty", "fitness", "outdoors", "hobby", "book", "experiences"],
-    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "tea", "fashion", "skincare", "makeup", "pets"],
-    occasions: ["birthday", "anniversary", "valentines", "mothers_day", "holiday", "christmas", "wedding", "engagement", "graduation", "just_because"],
-    gender: ["male", "female", "unisex"],
-    relationship: ["partner", "spouse", "boyfriend", "girlfriend", "friend", "family"],
-    vibe: ["romantic", "practical", "luxury", "fun", "sentimental", "creative", "cozy", "adventurous", "minimalist"],
-    traits: ["introverted", "extroverted", "analytical", "creative", "sentimental", "adventurous", "organized", "relaxed", "curious"]
+    gift_type: ["tech", "home", "kitchen", "fashion", "beauty", "fitness", "outdoors", "hobby", "book"],
+    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "fashion", "skincare", "makeup", "pets", "wellness", "home_decor"],
+    occasions: ["birthday", "anniversary", "valentines", "mothers_day", "christmas", "wedding", "engagement", "graduation", "apology", "just_because"],
+    gender_skew: ["female", "male", "unisex"],
+    vibe: ["pampering", "romantic", "sentimental", "luxe", "cozy", "fun", "thoughtful"]
 };
 
-const LIMITS = { categories: 2, interests: 5, occasions: 4, vibe: 3, traits: 3 };
+const LIMITS = { gift_type: 2, interests: 8, occasions: 6, vibe: 3 };
 
-const OPTION_LABELS = { mothers_day: "Mother's Day", just_because: "Just Because" };
+const OPTION_LABELS = { mothers_day: "Mother's Day", just_because: "Just Because", home_decor: "Home Decor", gift_type: "Gift Type", gender_skew: "Gender Skew", luxe: "Luxe" };
 
 function showAlert(message, type = 'info') {
     const el = document.getElementById('alert');
@@ -748,6 +730,7 @@ function populateProductForm(product, categorization) {
     document.getElementById('rating').value         = product?.rating ?? '';
     document.getElementById('reviewCount').value    = product?.review_count ?? '';
     document.getElementById('inStock').checked      = product?.in_stock !== false && product?.in_stock !== 0;
+    document.getElementById('gender_skew').value    = product?.gender_skew || 'unisex';
 
     if (!isManualEntry && product) {
         document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
@@ -757,13 +740,10 @@ function populateProductForm(product, categorization) {
         badge.style.display = 'inline-block';
     }
 
-    initMultiSelect('categories', OPTIONS.categories, LIMITS.categories);
+    initMultiSelect('gift_type', OPTIONS.gift_type, LIMITS.gift_type);
     initMultiSelect('interests',  OPTIONS.interests,  LIMITS.interests);
     initMultiSelect('occasions',  OPTIONS.occasions,  LIMITS.occasions);
-    initMultiSelect('gender',     OPTIONS.gender);
-    initMultiSelect('relationship', OPTIONS.relationship);
     initMultiSelect('vibe',       OPTIONS.vibe,       LIMITS.vibe);
-    initMultiSelect('traits',     OPTIONS.traits,     LIMITS.traits);
 
     if (categorization) applyCategorizationToForm(categorization);
 
@@ -771,14 +751,11 @@ function populateProductForm(product, categorization) {
 }
 
 function applyCategorizationToForm(cat) {
-    setMultiSelectValues('categories', cat.categories || []);
-    setMultiSelectValues('interests',  cat.interests  || []);
-    setMultiSelectValues('occasions',  cat.occasions  || []);
-    setMultiSelectValues('gender',     cat.recipient?.gender       || []);
-    setMultiSelectValues('relationship', cat.recipient?.relationship || []);
-    setMultiSelectValues('vibe',       cat.vibe       || []);
-    setMultiSelectValues('traits',     cat.personality_traits || []);
-    if (cat.experience_level) document.getElementById('experienceLevel').value = cat.experience_level;
+    setMultiSelectValues('gift_type',  cat.gift_type   || cat.categories || []);
+    setMultiSelectValues('interests',  cat.interests   || []);
+    setMultiSelectValues('occasions',  cat.occasions   || []);
+    setMultiSelectValues('vibe',       cat.vibe        || []);
+    if (cat.gender_skew) document.getElementById('gender_skew').value = cat.gender_skew;
 }
 
 function initMultiSelect(fieldName, options, maxLimit = null) {
@@ -852,28 +829,23 @@ async function saveProduct(event) {
         const reviewVal = document.getElementById('reviewCount').value;
 
         const product = {
-            name:              document.getElementById('productName').value,
-            display_name:      document.getElementById('displayName').value || null,
-            description:       document.getElementById('description').value,
-            brand:             document.getElementById('brand').value,
-            price:             parseFloat(document.getElementById('price').value),
-            currency:          document.getElementById('currency').value,
-            link:              document.getElementById('link').value,
-            image_url:         document.getElementById('imageUrl').value,
-            source:            document.getElementById('source').value,
-            categories:        getMultiSelectValues('categories'),
-            interests:         getMultiSelectValues('interests'),
-            occasions:         getMultiSelectValues('occasions'),
-            vibe:              getMultiSelectValues('vibe'),
-            personality_traits: getMultiSelectValues('traits'),
-            recipient: {
-                gender:       getMultiSelectValues('gender'),
-                relationship: getMultiSelectValues('relationship')
-            },
-            experience_level:  document.getElementById('experienceLevel').value,
-            rating:            ratingVal ? parseFloat(ratingVal) : (currentProduct?.rating || null),
-            review_count:      reviewVal ? parseInt(reviewVal) : (currentProduct?.review_count || 0),
-            in_stock:          document.getElementById('inStock').checked
+            name:         document.getElementById('productName').value,
+            display_name: document.getElementById('displayName').value || null,
+            description:  document.getElementById('description').value,
+            brand:        document.getElementById('brand').value,
+            price:        parseFloat(document.getElementById('price').value),
+            currency:     document.getElementById('currency').value,
+            link:         document.getElementById('link').value,
+            image_url:    document.getElementById('imageUrl').value,
+            source:       document.getElementById('source').value,
+            gift_type:    getMultiSelectValues('gift_type'),
+            interests:    getMultiSelectValues('interests'),
+            occasions:    getMultiSelectValues('occasions'),
+            vibe:         getMultiSelectValues('vibe'),
+            gender_skew:  document.getElementById('gender_skew').value,
+            rating:       ratingVal ? parseFloat(ratingVal) : (currentProduct?.rating || null),
+            review_count: reviewVal ? parseInt(reviewVal) : (currentProduct?.review_count || 0),
+            in_stock:     document.getElementById('inStock').checked
         };
 
         const saved = await apiRequest('/products/manual', 'POST', product);

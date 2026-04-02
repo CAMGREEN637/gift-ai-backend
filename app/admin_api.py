@@ -71,16 +71,14 @@ class ManualProductRequest(BaseModel):
     brand: Optional[str] = None
     price: float
     currency: str = "USD"
-    link: Optional[str] = None          # JS sends 'link'; stored as product_url in DB
+    link: Optional[str] = None
     image_url: Optional[str] = None
     source: str = "other"
-    categories: List[str] = []
+    gift_type: List[str] = []
     interests: List[str] = []
     occasions: List[str] = []
     vibe: List[str] = []
-    personality_traits: List[str] = []
-    recipient: Optional[dict] = None
-    experience_level: str = "beginner"
+    gender_skew: str = "unisex"
     rating: Optional[float] = None
     review_count: int = 0
     in_stock: bool = True
@@ -191,7 +189,7 @@ async def create_manual_product_endpoint(
         gift_temp = {
             "name": request.name,
             "description": request.description or '',
-            "categories": request.categories
+            "categories": request.gift_type
         }
         embedding_text = create_gift_text_for_embedding(gift_temp)
         embedding = generate_embedding(embedding_text)
@@ -201,7 +199,7 @@ async def create_manual_product_endpoint(
         gift_id = get_next_gift_id()
         logger.info("Generated gift ID: %s" % gift_id)
 
-        # Build the full record — matching the existing gifts table schema
+        # Build the full record — matching the current gifts table schema
         record = {
             'id': gift_id,
             'name': request.name,
@@ -213,13 +211,11 @@ async def create_manual_product_endpoint(
             'link': request.link,
             'image_url': request.image_url,
             'source': request.source,
-            'categories': request.categories,
+            'gift_type': request.gift_type,
             'interests': request.interests,
             'occasions': request.occasions,
             'vibe': request.vibe,
-            'personality_traits': request.personality_traits,
-            'recipient': request.recipient or {},
-            'experience_level': request.experience_level,
+            'gender_skew': request.gender_skew,
             'rating': request.rating,
             'review_count': request.review_count,
             'in_stock': request.in_stock,
