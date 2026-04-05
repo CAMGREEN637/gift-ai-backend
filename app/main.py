@@ -316,7 +316,7 @@ async def recommend(
         retrieve_gifts,
         query,               # built from quiz signals
         user_id,
-        10,                  # k
+        5,                   # k — 5 curated picks is enough, easier on the LLM too
         None,                # min_price — not used in new quiz schema
         max_price,
         days_until_needed,
@@ -328,14 +328,16 @@ async def recommend(
     logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
     # ------------------------------------------------------------------
-    # CONFIDENCE THRESHOLD FILTER — unchanged from original
+    # CONFIDENCE THRESHOLD FILTER
+    # Lowered to 0.65 now that k=5 — filtering at 0.8 with only 5 candidates
+    # risks returning 0-2 results too often.
     # ------------------------------------------------------------------
     original_count = len(gifts)
-    gifts = [g for g in gifts if g.get("confidence", 0) >= 0.8]
+    gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
     if original_count != len(gifts):
         logger.info(
             f"Filtered out {original_count - len(gifts)} gifts "
-            f"below the 80% confidence threshold."
+            f"below the 65% confidence threshold."
         )
 
     # ------------------------------------------------------------------
