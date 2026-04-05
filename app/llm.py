@@ -303,8 +303,6 @@ def generate_gift_response(
     reason_instruction = _build_reason_instruction(target, occasion, relationship)
 
     # --- Build sanitized gift context lines ---
-    # Each line kept short: name + vibe tags + truncated description (no raw quotes)
-    # This is the main vector for JSON-breaking characters — sanitize everything.
     gift_lines = []
     for i, g in enumerate(gifts, 1):
         name      = _sanitize_for_prompt(g.get("name", ""))
@@ -327,11 +325,12 @@ def generate_gift_response(
         f"INTERESTS: {', '.join(partner_interests[:5]) if partner_interests else 'unknown'}\n\n"
         f"{gift_intelligence}\n\n"
         f"RULES:\n"
+        f"- USE THE TARGET NAME: You MUST naturally incorporate '{target}' into the explanation instead of constantly saying 'she' or 'her'.\n"
         f"- Never describe product features. Explain what the gift COMMUNICATES.\n"
         f"- Be specific to {target}, this occasion, and this stage.\n"
         f"- 2 sentences per reason maximum. Confident, warm, direct.\n"
         f"- No phrases like 'perfect gift' or 'she will love it'.\n\n"
-        f"GOOD: This speaks directly to how she actually spends her time — it signals "
+        f"GOOD: This speaks directly to how {target} actually spends her time — it signals "
         f"you were thinking about her specifically, not just checking a box.\n"
         f"BAD: This blanket is soft and warm. She will love snuggling up with it.\n\n"
         f"Return valid JSON only. No markdown."
@@ -347,8 +346,6 @@ def generate_gift_response(
         )
 
     # --- LLM call strategy ---
-    # Token budget: 2 sentences ~60 tokens × 10 gifts = 600 + 200 structure overhead = 800 minimum.
-    # Use 1400 for full list to give real headroom. Retry with top 5 at 700 if truncated.
     parsed      = None
     tokens_used = 0
     start       = time.time()
@@ -388,7 +385,6 @@ def generate_gift_response(
     fallback = occasion_fallbacks.get(occasion or "", "A strong, well-matched choice for this moment.")
 
     # --- Enrich results ---
-    # display_name generation skipped when already set — prevents 10 extra LLM calls per request
     def enrich_single_gift(original: Dict) -> Dict:
         name         = original.get("name", "")
         reason       = _fuzzy_match_reason(name, llm_gifts) or fallback
