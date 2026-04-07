@@ -31,7 +31,9 @@ GENERIC_TOKENS = {
     "named", "called"
 }
 
-VECTOR_MATCH_THRESHOLD = 0.15
+# FIX #1: Raised from 0.15 → 0.30 to filter out weak semantic matches
+# (e.g. microphones appearing in skincare queries due to generic token overlap)
+VECTOR_MATCH_THRESHOLD = 0.30
 
 # --------------------------------------------------
 # SCORING WEIGHTS — ORIGINAL
@@ -50,6 +52,17 @@ SHIPPING_TIGHT_BONUS     = 5
 SHIPPING_LATE_PENALTY    = -20
 PRICE_FLOOR_RATIO        = 0.08
 PRICE_FLOOR_MAX_BUDGET   = 2000
+
+# FIX #2: Minimum vector similarity for full scoring.
+# Gifts below this threshold still enter the loop (they passed VECTOR_MATCH_THRESHOLD)
+# but have price affinity suppressed and intent score capped to 1 match worth of points.
+# This prevents weak semantic matches from accumulating full bonus scores.
+MIN_VECTOR_SCORE_FOR_FULL_SCORING = 0.35
+
+# FIX #3: Additional penalty applied when confidence == "confident" and
+# the gift's interests have zero overlap with the user's requested interests.
+# Prevents topically irrelevant gifts from surviving on generic token hits.
+CONFIDENT_INTEREST_MISMATCH_PENALTY = -40
 
 # --------------------------------------------------
 # SCORING WEIGHTS — NEW QUIZ SIGNALS
@@ -330,7 +343,12 @@ def compute_enhanced_score(
     preferences: Dict,
     user_id: Optional[str],
     partner_profile: Optional[Dict],
-    partner_gift_history: List[str]
+    partner_gift_history: List[str],
+    # FIX #3: new parameters for confident-mode interest mismatch penalty
+    confidence_level: str = "somewhat",
+    request_interests: Optional[List[str]] = None,
+    # FIX #2: when True, cap intent score to 1 match worth of points
+    weak_vector_match: bool = False,
 ) -> Dict:
     # Support both old column name (categories) and new (gift_type)
     g_interests  = gift.get("interests") or []
@@ -345,7 +363,11 @@ def compute_enhanced_score(
     ).lower()
 
     matched_intent = [t for t in meaningful_intent_tokens if t in gift_text]
-    intent_score = len(matched_intent) * INTENT_WEIGHT
+
+    # FIX #2: cap intent score to 1 match worth of points for weak vector matches,
+    # preventing generic token hits in unrelated descriptions from inflating score.
+    effective_intent_count = min(len(matched_intent), 1) if weak_vector_match else len(matched_intent)
+    intent_score = effective_intent_count * INTENT_WEIGHT
 
     user_interests = [i.lower().strip() for i in preferences.get("interests", []) if i]
     gift_tag_blob = " ".join(g_interests + g_categories).lower()
@@ -393,9 +415,27 @@ def compute_enhanced_score(
             f"{meaningful_intent_tokens}"
         )
 
+    # FIX #3: Confident-mode interest mismatch penalty
+    # When the user said they know her interests well (confidence == "confident")
+    # and the gift's tagged interests share zero overlap with the requested
+    # interests, apply an additional penalty. This prevents topically unrelated
+    # gifts (e.g. microphones in a skincare query) from surviving on generic
+    # token hits alone.
+    confident_mismatch_penalty = 0
+    if (confidence_level == "confident"
+            and request_interests
+            and len(broad_interest_matches) == 0):
+        confident_mismatch_penalty = CONFIDENT_INTEREST_MISMATCH_PENALTY
+        logger.debug(
+            f"Confident-mode interest mismatch penalty applied to "
+            f"'{gift.get('name')}': no overlap between gift interests "
+            f"{g_interests} and requested interests {request_interests}"
+        )
+
     total_boost = (
         intent_score + session_score + profile_score
         + history_penalty + feedback_score + intent_penalty
+        + confident_mismatch_penalty
     )
 
     return {
@@ -571,6 +611,19 @@ def retrieve_gifts(
 
     The `request` parameter is optional for full backward compatibility.
     All existing callers that pass only `query` continue to work unchanged.
+
+    Changes in this version:
+      - FIX #1: VECTOR_MATCH_THRESHOLD raised from 0.15 → 0.30 to filter
+        weak semantic matches before scoring begins.
+      - FIX #2: MIN_VECTOR_SCORE_FOR_FULL_SCORING = 0.35 gate — gifts below
+        this threshold have intent score capped to 1 match and price affinity
+        suppressed, preventing generic token hits from inflating their score.
+      - FIX #3: confident-mode interest mismatch penalty (-40 pts) applied
+        inside compute_enhanced_score when confidence == "confident" and
+        the gift has zero interest overlap with the user's requested interests.
+      - FIX #4: price affinity relevance gate tightened to require ≥2 intent
+        token matches, or 1 intent match + ≥1 broad interest match (was: any
+        single token match).
     """
     preferences = normalize_preferences(preferences)
     meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
@@ -621,6 +674,11 @@ def retrieve_gifts(
         logger.error(traceback.format_exc())
         return []
 
+    # Resolve request_interests once for use in confident-mode penalty
+    request_interests: Optional[List[str]] = None
+    if request is not None and confidence_level == "confident":
+        request_interests = list(request.interests or [])
+
     scored = []
 
     for g in raw_gifts:
@@ -654,12 +712,19 @@ def retrieve_gifts(
 
         vec_sim = float(g.get("similarity") or 0)
 
+        # FIX #2: Gate flag — gifts with weak vector similarity get reduced
+        # scoring power: intent score capped to 1 match and price affinity suppressed.
+        weak_vector_match = vec_sim < MIN_VECTOR_SCORE_FOR_FULL_SCORING
+
         # ---- Original scoring ----------------------------------------
         vector_score = vec_sim * VECTOR_WEIGHT
 
         score_data = compute_enhanced_score(
             g, meaningful_intent_tokens, preferences,
-            user_id, partner_profile, partner_gift_history
+            user_id, partner_profile, partner_gift_history,
+            confidence_level=confidence_level,
+            request_interests=request_interests,
+            weak_vector_match=weak_vector_match,
         )
 
         novelty_score = (
@@ -691,12 +756,18 @@ def retrieve_gifts(
                 on_time_bonus   = SHIPPING_LATE_PENALTY
                 delivery_status = "late"
 
-        # Gate price affinity behind relevance (original logic preserved)
+        # FIX #4: Tighter relevance gate — require at least 2 intent token matches,
+        # or 1 intent match AND a broad interest match, before unlocking price affinity.
+        # Previously a single generic token hit (e.g. "fun") was enough to unlock it.
         has_relevance = (
-            score_data["intent_match_count"] > 0
-            or len(score_data["broad_interest_matches"]) > 0
+            score_data["intent_match_count"] >= 2
+            or (score_data["intent_match_count"] >= 1
+                and len(score_data["broad_interest_matches"]) > 0)
         )
-        gated_price_affinity = price_affinity if has_relevance else 0.0
+
+        # FIX #2: Also suppress price affinity for weak vector matches regardless
+        # of intent token hits, since those hits may be on generic description words.
+        gated_price_affinity = price_affinity if (has_relevance and not weak_vector_match) else 0.0
 
         original_score = (
             vector_score
