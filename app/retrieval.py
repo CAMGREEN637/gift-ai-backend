@@ -78,6 +78,17 @@ WEIGHT_OCCASION_MATCH    = 0.10
 MALE_SKEW_PENALTY        = 0.15  # Fix #1 — soft penalty, not hard filter
 
 # --------------------------------------------------
+# NICHE INTEREST HARD FILTER
+# Gift interests that should ONLY appear in results
+# if the user explicitly selected that interest.
+# Prevents e.g. "dog mom candle" from appearing for
+# someone who never indicated they have a pet.
+# Add to this set as new niche tags are introduced.
+# --------------------------------------------------
+
+NICHE_INTEREST_TAGS: Set[str] = {"pets"}
+
+# --------------------------------------------------
 # OCCASION → VIBE AFFINITY
 # Boosts gifts whose vibe aligns with the occasion
 # even if the user didn't explicitly select that vibe
@@ -624,6 +635,8 @@ def retrieve_gifts(
       - FIX #4: price affinity relevance gate tightened to require ≥2 intent
         token matches, or 1 intent match + ≥1 broad interest match (was: any
         single token match).
+      - NICHE FILTER: gifts tagged with niche interests (e.g. "pets") are hard-
+        filtered out unless the user explicitly selected that interest.
     """
     preferences = normalize_preferences(preferences)
     meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
@@ -641,6 +654,9 @@ def retrieve_gifts(
     effective_max = max_price
     if request is not None and getattr(request, "occasion", None) == "apology":
         effective_max = min(max_price or 999999, APOLOGY_PRICE_CEILING)
+
+    # Build the set of niche interests the user DID select, for filter use below
+    user_interests_set = set(preferences.get("interests", []))
 
     try:
         supabase = get_supabase_client()
@@ -708,6 +724,21 @@ def retrieve_gifts(
                 and effective_max <= PRICE_FLOOR_MAX_BUDGET
                 and current_price > 0
                 and current_price < effective_max * PRICE_FLOOR_RATIO):
+            continue
+
+        # --------------------------------------------------
+        # NICHE INTEREST HARD FILTER
+        # If the gift is tagged with any niche interest the user did NOT
+        # select, exclude it entirely. This prevents e.g. pet-themed gifts
+        # from surfacing for someone who never indicated they have a pet.
+        # --------------------------------------------------
+        gift_interests_set = set(g.get("interests") or [])
+        unselected_niche_tags = NICHE_INTEREST_TAGS & gift_interests_set - NICHE_INTEREST_TAGS & user_interests_set
+        if unselected_niche_tags:
+            logger.debug(
+                f"Niche filter removed '{g.get('name')}' — "
+                f"tagged {unselected_niche_tags} but user did not select those interests"
+            )
             continue
 
         vec_sim = float(g.get("similarity") or 0)
