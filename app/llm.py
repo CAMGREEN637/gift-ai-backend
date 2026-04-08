@@ -114,9 +114,9 @@ def _build_gift_intelligence_block(
         lines.append(f"AVOID: {OCCASION_PITFALLS[occasion]}")
 
     if confidence == "lost":
-        lines.append("NOTE: He does not know her interests well. Frame reasons around the occasion and vibe.")
+        lines.append("NOTE: He does not know her interests well. Anchor reasons in occasion and stage logic only — do not reference interests.")
     elif confidence == "confident":
-        lines.append("NOTE: He knows her well. Connect each reason directly to her specific interests.")
+        lines.append("NOTE: He knows her well. Where interests are provided, connect each reason directly to them.")
 
     return "\n".join(lines)
 
@@ -127,22 +127,22 @@ def _build_reason_instruction(
     stage: Optional[str],
 ) -> str:
     occasion_angles = {
-        "birthday":    f"why this celebrates {target} as an individual",
-        "valentines":  f"what this gift communicates to {target} on Valentine's Day",
-        "anniversary": f"how this acknowledges the depth of their relationship",
-        "christmas":   f"why this is the right Christmas gift for {target}",
-        "mothers_day": f"how this makes {target} feel appreciated and celebrated",
-        "just_because":f"why this works as a spontaneous, personal surprise for {target}",
-        "apology":     f"why this is the right apology gesture — the sincerity it conveys",
+        "birthday":    f"why this is the right birthday gift given what you know about {target} — not a generic birthday gift, but a specific one for her",
+        "valentines":  f"why this is the right Valentine's Day move at this stage of the relationship",
+        "anniversary": f"why this lands well for an anniversary given where they are in the relationship",
+        "christmas":   f"why this is a strong Christmas gift for someone with her interests",
+        "mothers_day": f"why this gives {target} the kind of break and appreciation Mother's Day is actually about",
+        "just_because":f"why this works as an unexpected, personal gesture for {target}",
+        "apology":     f"why this reads as sincere and considerate rather than expensive or generic",
     }
-    angle = occasion_angles.get(occasion or "", f"why this is a smart gift for {target} right now")
+    angle = occasion_angles.get(occasion or "", f"why this is a well-matched gift for {target} right now")
 
     stage_lens = {
-        "new":         "Keep it light — explain why this feels right without being too intense.",
-        "dating":      "Highlight how it shows he was paying attention to her specifically.",
-        "serious":     "Explain how it treats her as someone he truly knows.",
-        "committed":   "Connect it to pampering her or their shared life.",
-        "complicated": "Keep the framing warm and genuine — avoid anything that sounds loaded.",
+        "new":         "Reassure the buyer that this feels right without being too intense for an early relationship.",
+        "dating":      "Validate that this shows he was paying attention to her specifically — not just buying something easy.",
+        "serious":     "Confirm this is the right level — something she'd never buy herself, tied to what she's actually into.",
+        "committed":   "Reassure him this hits the pampering or personal angle that works in a long relationship.",
+        "complicated": "Validate that this feels warm and genuine without putting pressure on where things stand.",
     }
     lens = stage_lens.get(stage or "", "")
     return f"Explain {angle}. {lens}".strip()
@@ -315,24 +315,32 @@ def generate_gift_response(
             f"{i}. {name} (${price}) | vibe: {vibe_tags} | {desc}"
         )
 
-    # --- System prompt (shared between full and retry calls) ---
+    # --- System prompt ---
+    # Safe interests preview for inline use in the GOOD example
+    interests_preview = partner_interests[0] if partner_interests else "her known interests"
+
     system_prompt = (
-        f"You are an elite gift advisor helping men choose the right gift for their partner.\n"
-        f"Explain WHY each gift is the right move — not what the product does.\n\n"
+        f"You are an elite gift advisor helping men feel confident about the gift they're about to buy.\n"
+        f"Your job is NOT to describe the product or invent things about the recipient. "
+        f"Your job is to REASSURE the buyer — explain why this is the right call given "
+        f"the occasion, the stage of the relationship, and what he actually knows about her.\n\n"
         f"TARGET: {target} | OCCASION: {occasion or 'general'} | "
         f"STAGE: {relationship or 'unknown'} | TIMING: {urgency} | "
         f"BUDGET: {'$' + str(budget) if budget else 'flexible'}\n"
-        f"INTERESTS: {', '.join(partner_interests[:5]) if partner_interests else 'unknown'}\n\n"
+        f"KNOWN INTERESTS: {', '.join(partner_interests[:5]) if partner_interests else 'not specified'}\n\n"
         f"{gift_intelligence}\n\n"
         f"RULES:\n"
-        f"- USE THE TARGET NAME: You MUST naturally incorporate '{target}' into the explanation instead of constantly saying 'she' or 'her'.\n"
-        f"- Never describe product features. Explain what the gift COMMUNICATES.\n"
-        f"- Be specific to {target}, this occasion, and this stage.\n"
-        f"- 2 sentences per reason maximum. Confident, warm, direct.\n"
-        f"- No phrases like 'perfect gift' or 'she will love it'.\n\n"
-        f"GOOD: This speaks directly to how {target} actually spends her time — it signals "
-        f"you were thinking about her specifically, not just checking a box.\n"
-        f"BAD: This blanket is soft and warm. She will love snuggling up with it.\n\n"
+        f"- You are writing for the BUYER, not about the recipient. Reassure him his choice is right.\n"
+        f"- ONLY reference interests explicitly listed in KNOWN INTERESTS. Never invent traits, values, or preferences.\n"
+        f"- Anchor every reason in one or more of: (1) occasion logic, (2) relationship stage logic, (3) her known interests. Use only what you actually have.\n"
+        f"- If no interests are known, rely on occasion + stage alone. Do not fabricate specificity.\n"
+        f"- 2 sentences max per reason. Confident, warm, direct.\n"
+        f"- No phrases like 'perfect gift', 'she will love it', 'timeless', 'cherished', 'lasting elegance'.\n"
+        f"- Use '{target}' naturally where it fits. Do not force it into every sentence.\n\n"
+        f"GOOD: Valentine's Day at this stage calls for something warm and intentional — not practical. "
+        f"Her interest in {interests_preview} gives this a real hook, so it reads as specific rather than a default gesture.\n"
+        f"BAD: This speaks to {target}'s deep appreciation for timeless elegance and lasting beauty — "
+        f"it honors who she is at her core.\n\n"
         f"Return valid JSON only. No markdown."
     )
 
@@ -374,15 +382,15 @@ def generate_gift_response(
 
     # --- Occasion-aware fallback reasons ---
     occasion_fallbacks = {
-        "valentines":  "A warm, intentional choice that fits the occasion without being generic.",
-        "anniversary": "A meaningful pick that reflects how well he knows her.",
-        "birthday":    "A gift that is genuinely about her — not just the occasion.",
-        "mothers_day": "A pampering choice that says he sees how much she does.",
-        "apology":     "A sincere, personal gesture that does not try too hard.",
-        "just_because":"A thoughtful surprise that shows she is on his mind.",
-        "christmas":   "A warm, indulgent pick she would love but would not buy herself.",
+        "valentines":  "Valentine's Day calls for something warm and intentional — this fits that register without feeling like a default.",
+        "anniversary": "Anniversaries reward thoughtfulness over price. This is a considered pick that reflects where they are.",
+        "birthday":    "Her birthday is about her as a person, not the relationship. This is tied to her interests, not just the occasion.",
+        "mothers_day": "Mother's Day is about making her feel seen and rested. This delivers that without overcomplicating it.",
+        "apology":     "The best apology gifts feel personal, not expensive. This reads as sincere rather than compensatory.",
+        "just_because":"Spontaneous gifts land best when they feel warm and specific rather than planned. This does both.",
+        "christmas":   "Christmas is about indulgence — something she'd love but wouldn't buy herself. This fits that brief.",
     }
-    fallback = occasion_fallbacks.get(occasion or "", "A strong, well-matched choice for this moment.")
+    fallback = occasion_fallbacks.get(occasion or "", "A well-matched choice given the occasion and where they are.")
 
     # --- Enrich results ---
     def enrich_single_gift(original: Dict) -> Dict:
