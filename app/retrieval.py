@@ -37,9 +37,14 @@ GENERIC_TOKENS = {
     "indulgent", "range", "mid"
 }
 
-# FIX #1: Raised from 0.15 → 0.30 to filter out weak semantic matches
-# (e.g. microphones appearing in skincare queries due to generic token overlap)
-VECTOR_MATCH_THRESHOLD = 0.30
+# Threshold tuning note:
+# Previously raised to 0.30 to filter weak semantic matches.
+# Lowered back to 0.22 now that the confident-mode hard interest filter
+# handles topically irrelevant results at the scoring stage. A threshold
+# of 0.30 is too aggressive for niche interest categories (e.g. gardening)
+# where gifts may have slightly lower vector similarity to a noisy query
+# but are still the correct results.
+VECTOR_MATCH_THRESHOLD = 0.22
 
 # --------------------------------------------------
 # SCORING WEIGHTS — ORIGINAL (with updates)
@@ -290,64 +295,58 @@ def compute_price_affinity_bonus(
 
 def build_search_query(request: RecommendRequest) -> str:
     """
-    Constructs a rich natural language query for the embedding.
-    Used instead of the raw user query when a full RecommendRequest
-    is available (i.e. when the user came through the new quiz).
+    Constructs a retrieval-optimised query for the embedding model.
+
+    Design principles:
+    - When confidence is "confident", interests lead the query so the embedding
+      anchors to the interest domain first. Occasion follows as context only.
+    - Vibe expansion phrases are intentionally excluded — they contain many words
+      that live in GENERIC_TOKENS and dilute the interest signal in the embedding.
+      Vibes are applied at scoring time via compute_quiz_signal_score instead.
+    - Price tier labels are dropped — they don't help retrieval and were adding
+      noisy generic adjectives (premium, luxury, high-end) to the query.
     """
     parts = []
 
     occasion_phrases = {
-        "birthday":    "birthday gift for girlfriend",
-        "valentines":  "Valentine's Day gift for her",
-        "anniversary": "anniversary gift romantic partner",
-        "christmas":   "Christmas gift for girlfriend",
-        "mothers_day": "Mother's Day gift pampering",
-        "just_because":"surprise gift for girlfriend",
-        "apology":     "apology gift for girlfriend sincere thoughtful",
+        "birthday":     "birthday gift",
+        "valentines":   "Valentine's Day gift",
+        "anniversary":  "anniversary gift",
+        "christmas":    "Christmas gift",
+        "mothers_day":  "Mother's Day gift",
+        "just_because": "surprise gift",
+        "apology":      "apology gift sincere",
     }
-    parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
 
-    stage_phrases = {
-        "new":         "new relationship",
-        "dating":      "girlfriend",
-        "serious":     "serious girlfriend living together",
-        "committed":   "wife or fiancée",
-        "complicated": "girlfriend complicated relationship",
-    }
-    if request.relationship_stage:
-        parts.append(stage_phrases.get(request.relationship_stage, ""))
-
-    if request.vibe:
-        vibe_phrases = {
-            "pampering":   "pampering spa self-care relaxing",
-            "romantic":    "romantic love intimate",
-            "sentimental": "sentimental personal meaningful keepsake",
-            "luxe":        "luxury premium high-end indulgent",
-            "cozy":        "cozy warm comfortable home",
-            "fun":         "fun playful surprising novelty",
-            "thoughtful":  "thoughtful specific personal her interests",
-        }
-        for v in (request.vibe or []):
-            if v in vibe_phrases:
-                parts.append(vibe_phrases[v])
-
-    # Interests — skip when confidence is 'lost'
-    if request.confidence != "lost" and request.interests:
+    # Confident mode: interests lead so the embedding anchors to the right domain.
+    # Without this, a query like "birthday gift ... gardening" buries the key term
+    # after a wall of boilerplate and returns almost no candidates.
+    if request.confidence == "confident" and request.interests:
         parts.append(" ".join(request.interests[:5]))
+        if request.overlap_interests:
+            parts.append(" ".join(request.overlap_interests))
+        parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
 
-    # Overlap interests get extra weight in the query itself
-    if request.overlap_interests:
-        parts.append(" ".join(request.overlap_interests))
+    else:
+        # Default order: occasion -> relationship stage -> interests
+        parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
 
-    if request.max_price:
-        if request.max_price <= 50:
-            parts.append("affordable under 50 dollars")
-        elif request.max_price <= 100:
-            parts.append("mid-range gift")
-        elif request.max_price <= 200:
-            parts.append("premium gift")
-        else:
-            parts.append("luxury high-end gift")
+        stage_phrases = {
+            "new":         "new relationship",
+            "dating":      "girlfriend",
+            "serious":     "girlfriend",
+            "committed":   "wife",
+            "complicated": "girlfriend",
+        }
+        if request.relationship_stage:
+            parts.append(stage_phrases.get(request.relationship_stage, ""))
+
+        # Interests — skip when confidence is 'lost' (user doesn't know her interests)
+        if request.confidence != "lost" and request.interests:
+            parts.append(" ".join(request.interests[:5]))
+
+        if request.overlap_interests:
+            parts.append(" ".join(request.overlap_interests))
 
     return " ".join(filter(None, parts))
 
