@@ -309,21 +309,20 @@ async def recommend(
     # ------------------------------------------------------------------
     # RETRIEVE GIFTS
     # Pass full RecommendRequest as `request` to activate quiz scoring.
-    # All other params unchanged from original.
+    # k has been removed from retrieve_gifts — it always returns 5 results.
     # ------------------------------------------------------------------
     t_retrieval = time.time()
     gifts = await asyncio.to_thread(
         retrieve_gifts,
         query,               # built from quiz signals
-        user_id,
-        5,                   # k — 5 curated picks is enough, easier on the LLM too
+        user_id,             # user_id
         None,                # min_price — not used in new quiz schema
         max_price,
         days_until_needed,
         merged_preferences,
         partner_profile,
         partner_gift_history,
-        body,                # NEW — full request for quiz signal scoring
+        body,                # full request for quiz signal scoring
     )
     logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
