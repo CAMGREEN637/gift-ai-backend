@@ -37,14 +37,11 @@ GENERIC_TOKENS = {
     "indulgent", "range", "mid"
 }
 
-# Threshold tuning note:
-# Lowered to 0.15 — text-embedding-3-small returns conservative similarity
-# scores, especially for short queries against long multi-field gift texts.
-# The hard interest filter and confident-mode Pass 1 filter are the real
-# quality gates. This threshold only needs to be low enough that legitimate
-# candidates (e.g. a gardening tool set for a "gardening Christmas gift"
-# query) are not excluded before scoring begins.
-VECTOR_MATCH_THRESHOLD = 0.15
+# Threshold set to 0.0 — the hard interest filter (Pass 1) and
+# MIN_VECTOR_SCORE_FOR_FULL_SCORING gate handle quality. This just
+# ensures match_gifts always returns a full 80-candidate pool so
+# Pass 2 has enough inventory to find vibe/occasion fallbacks.
+VECTOR_MATCH_THRESHOLD = 0.0
 
 # --------------------------------------------------
 # SCORING WEIGHTS — ORIGINAL (with updates)
@@ -908,19 +905,26 @@ def retrieve_gifts(
             else:
                 fallback_tier = 4          # budget/price floor
 
-            fallback_candidates.append((fallback_tier, g, current_price))
+            # Include vector similarity as a secondary sort key.
+            # Within each tier, gifts with higher semantic similarity to the
+            # query (i.e. more interest-adjacent) rank above pure vibe matches.
+            sim_score = float(g.get("similarity") or 0)
+            fallback_candidates.append((fallback_tier, sim_score, g, current_price))
 
-        fallback_candidates.sort(key=lambda x: x[0])
+        # Sort by tier ascending, then similarity descending within each tier.
+        # This organically surfaces interest-adjacent gifts (e.g. botanical candle)
+        # above unrelated vibe matches (e.g. cashmere throw) within the same tier.
+        fallback_candidates.sort(key=lambda x: (x[0], -x[1]))
 
         added = 0
-        for tier, g, current_price in fallback_candidates:
+        for tier, sim_score, g, current_price in fallback_candidates:
             if added >= needed:
                 break
             _score_gift(g, current_price, is_fallback=True)
             scored.append(g)
             added += 1
             logger.info(
-                f"Pass 2 (tier {tier}) added fallback: '{g.get('display_name')}'"
+                f"Pass 2 (tier {tier}, sim {sim_score:.2f}) added fallback: '{g.get('display_name')}'"
             )
 
     # --------------------------------------------------
