@@ -739,7 +739,7 @@ def retrieve_gifts(
 
         # Niche interest hard filter (applies to both passes)
         gift_interests_set = set(g.get("interests") or [])
-        unselected_niche = NICHE_INTEREST_TAGS & gift_interests_set - NICHE_INTEREST_TAGS & user_interests_set
+        unselected_niche = (NICHE_INTEREST_TAGS & gift_interests_set) - (NICHE_INTEREST_TAGS & user_interests_set)
         if unselected_niche:
             logger.debug(
                 f"Niche filter removed '{g.get('name')}' — "
