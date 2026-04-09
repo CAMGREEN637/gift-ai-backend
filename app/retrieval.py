@@ -4,7 +4,7 @@ import traceback
 import re
 import json
 import time
-from typing import List, Dict, Optional, Set, Tuple
+from typing import Any, List, Dict, Optional, Set, Tuple
 from collections import defaultdict
 from dotenv import load_dotenv
 
@@ -235,7 +235,7 @@ def extract_meaningful_intent_tokens(query: str) -> Set[str]:
     return meaningful
 
 
-def normalize_jsonb_to_list(value) -> List[str]:
+def normalize_jsonb_to_list(value: Any) -> List[str]:
     """Convert JSONB field to Python list of strings safely."""
     if value is None:
         return []
@@ -246,8 +246,8 @@ def normalize_jsonb_to_list(value) -> List[str]:
             parsed = json.loads(value)
             if isinstance(parsed, list):
                 return [str(v).strip().lower() for v in parsed if v]
-        except (json.JSONDecodeError, TypeError):
-            return [v.strip().lower() for v in value.split(",") if v.strip()]
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return [v.strip().lower() for v in str(value).split(",") if v.strip()]
     return []
 
 
@@ -362,10 +362,8 @@ def compute_enhanced_score(
     user_id: Optional[str],
     partner_profile: Optional[Dict],
     partner_gift_history: List[str],
-    # FIX #3: new parameters for confident-mode interest mismatch penalty
     confidence_level: str = "somewhat",
-    request_interests: Optional[List[str]] = None,
-    # FIX #2: when True, cap intent score to 1 match worth of points
+    # when True, cap intent score to 1 match worth of points
     weak_vector_match: bool = False,
 ) -> Dict:
     # Support both old column name (categories) and new (gift_type)
@@ -441,26 +439,19 @@ def compute_enhanced_score(
             f"{meaningful_intent_tokens}"
         )
 
-    # FIX #3: Confident-mode interest mismatch penalty (doubled to -80)
-    # When the user said they know her interests well (confidence == "confident")
-    # and the gift's tagged interests share zero overlap with the requested
-    # interests, apply an additional penalty. This prevents topically unrelated
-    # gifts from surviving on generic token hits alone.
-    confident_mismatch_penalty = 0
-    if (confidence_level == "confident"
-            and request_interests
-            and not interest_overlap):
-        confident_mismatch_penalty = CONFIDENT_INTEREST_MISMATCH_PENALTY
-        logger.debug(
-            f"Confident-mode interest mismatch penalty applied to "
-            f"'{gift.get('name')}': no overlap between gift interests "
-            f"{g_interests} and requested interests {request_interests}"
-        )
+    # FIX #3 (removed): The confident-mode interest mismatch penalty (-80) was
+    # previously applied here to prevent topically unrelated gifts from scoring
+    # well. It is no longer needed because:
+    #   - Pass 1's hard filter already excludes zero-overlap gifts before scoring.
+    #   - Pass 2 explicitly scores those excluded gifts as fallbacks, and applying
+    #     -80 to them would produce large negative scores that skew logs and any
+    #     downstream display of score strength.
+    # Segregation between interest-matched and fallback gifts is handled cleanly
+    # by the two-pass structure and the `fallback` flag on each result.
 
     total_boost = (
         intent_score + session_score + exact_boost + profile_score
         + history_penalty + feedback_score + intent_penalty
-        + confident_mismatch_penalty
     )
 
     return {
@@ -615,14 +606,12 @@ def _relationship_stage_bonus(
 def retrieve_gifts(
     query: str,
     user_id: Optional[str] = None,
-    k: int = 10,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     days_until_needed: Optional[int] = None,
     preferences: Optional[Dict] = None,
     partner_profile: Optional[Dict] = None,
     partner_gift_history: Optional[List[str]] = None,
-    # New optional parameter — when provided, quiz signal scoring activates
     request: Optional[RecommendRequest] = None,
 ) -> List[Dict]:
     """
@@ -717,19 +706,22 @@ def retrieve_gifts(
         logger.error(traceback.format_exc())
         return []
 
-    scored = []
-
+    # --------------------------------------------------
+    # NORMALISE RAW GIFTS ONCE
+    # Both passes operate on this shared normalised list.
+    # Price/niche filters are applied here so neither pass
+    # has to repeat that logic.
+    # --------------------------------------------------
+    normalised = []
     for g in raw_gifts:
-        # Normalize all JSONB fields
         g["interests"]  = normalize_jsonb_to_list(g.get("interests"))
         g["gift_type"]  = normalize_jsonb_to_list(g.get("gift_type") or g.get("categories"))
-        g["categories"] = g["gift_type"]  # backward compat alias
+        g["categories"] = g["gift_type"]
         g["vibe"]       = normalize_jsonb_to_list(g.get("vibe"))
         g["occasions"]  = normalize_jsonb_to_list(g.get("occasions"))
 
         if not g.get("display_name"):
             g["display_name"] = g.get("name", "Unique Gift")
-
         g["product_url"] = g.get("link") or g.get("product_url")
 
         try:
@@ -737,68 +729,52 @@ def retrieve_gifts(
         except (ValueError, TypeError):
             current_price = 0.0
 
-        # Hard price ceiling (respects apology ceiling)
+        # Hard price ceiling
         if effective_max is not None and current_price > effective_max:
             continue
 
-        # Price floor — skip implausibly cheap gifts relative to budget
+        # Price floor
         if (effective_max is not None
                 and effective_max <= PRICE_FLOOR_MAX_BUDGET
                 and current_price > 0
                 and current_price < effective_max * PRICE_FLOOR_RATIO):
             continue
 
-        # --------------------------------------------------
-        # NICHE INTEREST HARD FILTER
-        # If the gift is tagged with any niche interest the user did NOT
-        # select, exclude it entirely. This prevents e.g. pet-themed gifts
-        # from surfacing for someone who never indicated they have a pet.
-        # --------------------------------------------------
+        # Niche interest hard filter (applies to both passes)
         gift_interests_set = set(g.get("interests") or [])
-        unselected_niche_tags = NICHE_INTEREST_TAGS & gift_interests_set - NICHE_INTEREST_TAGS & user_interests_set
-        if unselected_niche_tags:
+        unselected_niche = NICHE_INTEREST_TAGS & gift_interests_set - NICHE_INTEREST_TAGS & user_interests_set
+        if unselected_niche:
             logger.debug(
                 f"Niche filter removed '{g.get('name')}' — "
-                f"tagged {unselected_niche_tags} but user did not select those interests"
+                f"tagged {unselected_niche} but user did not select those interests"
             )
             continue
 
-        # --------------------------------------------------
-        # CONFIDENT-MODE HARD INTEREST FILTER
-        # When the user indicated they know her interests well, remove any
-        # gift that shares zero overlap with those interests before scoring.
-        # No scoring combination should be able to surface a topically
-        # unrelated gift in confident mode — this is the safety net.
-        # --------------------------------------------------
-        if confidence_level == "confident" and request_interests:
-            if not gift_interests_set & set(request_interests):
-                logger.debug(
-                    f"Confident hard filter removed '{g.get('name')}' — "
-                    f"gift interests {list(gift_interests_set)} share no overlap "
-                    f"with requested interests {request_interests}"
-                )
-                continue
+        # Store price alongside the gift as a tuple — avoids mutating the
+        # raw DB dict with a hidden _price key that would confuse callers.
+        normalised.append((g, current_price))
 
+    # --------------------------------------------------
+    # SHARED SCORING HELPER
+    # Scores a single gift and attaches result fields.
+    # Used by both Pass 1 and Pass 2.
+    # --------------------------------------------------
+    def _score_gift(g: Dict, current_price: float, is_fallback: bool = False) -> Dict:
         vec_sim = float(g.get("similarity") or 0)
-
-        # FIX #2: Gate flag — gifts with weak vector similarity get reduced
-        # scoring power: intent score capped to 1 match and price affinity suppressed.
         weak_vector_match = vec_sim < MIN_VECTOR_SCORE_FOR_FULL_SCORING
 
-        # ---- Original scoring ----------------------------------------
         vector_score = vec_sim * VECTOR_WEIGHT
 
         score_data = compute_enhanced_score(
             g, meaningful_intent_tokens, preferences,
             user_id, partner_profile, partner_gift_history,
             confidence_level=confidence_level,
-            request_interests=request_interests,
             weak_vector_match=weak_vector_match,
         )
 
         novelty_score = (
             NOVELTY_BOOST
-            if str(g.get("id")) not in [str(id) for id in partner_gift_history]
+            if str(g.get("id")) not in [str(gid) for gid in partner_gift_history]
             else 0
         )
 
@@ -811,7 +787,7 @@ def retrieve_gifts(
         except (ValueError, TypeError):
             price_affinity = 0.0
 
-        on_time_bonus  = 0
+        on_time_bonus = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
             shipping_max = int(g.get("shipping_max_days") or 7)
@@ -825,17 +801,11 @@ def retrieve_gifts(
                 on_time_bonus   = SHIPPING_LATE_PENALTY
                 delivery_status = "late"
 
-        # FIX #4: Tighter relevance gate — require at least 2 intent token matches,
-        # or 1 intent match AND a broad interest match, before unlocking price affinity.
-        # Previously a single generic token hit (e.g. "fun") was enough to unlock it.
         has_relevance = (
             score_data["intent_match_count"] >= 2
             or (score_data["intent_match_count"] >= 1
                 and len(score_data["broad_interest_matches"]) > 0)
         )
-
-        # FIX #2: Also suppress price affinity for weak vector matches regardless
-        # of intent token hits, since those hits may be on generic description words.
         gated_price_affinity = price_affinity if (has_relevance and not weak_vector_match) else 0.0
 
         original_score = (
@@ -846,10 +816,6 @@ def retrieve_gifts(
             + gated_price_affinity
         )
 
-        # ---- New quiz-signal scoring (additive) ----------------------
-        # Only runs when a RecommendRequest is available.
-        # Scaled by 30 to be meaningful relative to the original score
-        # range (typically 0–200). At max this adds ~45 points (~15%).
         quiz_signal_score = 0.0
         if request is not None:
             quiz_signal_score = compute_quiz_signal_score(
@@ -858,7 +824,6 @@ def retrieve_gifts(
 
         final_score = original_score + quiz_signal_score
 
-        # ---- Confidence and reasons ----------------------------------
         confidence_val = compute_confidence(vec_sim, score_data["intent_match_count"])
 
         reasons = []
@@ -868,6 +833,8 @@ def retrieve_gifts(
             reasons.append("Matches your interests")
         if delivery_status == "on_time":
             reasons.append("Fast shipping")
+        if is_fallback:
+            reasons.append("Great for the occasion")
 
         g.update({
             "score":            final_score,
@@ -876,10 +843,93 @@ def retrieve_gifts(
             "delivery_status":  delivery_status,
             "already_purchased":score_data.get("already_purchased", False),
             "missed_intent":    score_data.get("missed_intent", False),
+            "fallback":         is_fallback,
         })
-        scored.append(g)
+        return g
 
-    # ---- Diversity logic (original — preserved intact) ---------------
+    # --------------------------------------------------
+    # PASS 1 — Confident-mode interest hard filter active
+    # Only gifts with direct interest overlap are scored.
+    # --------------------------------------------------
+    scored = []
+    for g, current_price in normalised:
+        gift_interests_set = set(g.get("interests") or [])
+
+        if confidence_level == "confident" and request_interests:
+            if not gift_interests_set & set(request_interests):
+                logger.debug(
+                    f"Pass 1 hard filter removed '{g.get('name')}' — "
+                    f"no overlap with requested interests {request_interests}"
+                )
+                continue
+
+        scored.append(_score_gift(g, current_price, is_fallback=False))
+
+    logger.info(f"Pass 1 yielded {len(scored)} interest-matched gifts")
+
+    # --------------------------------------------------
+    # PASS 2 — Fallback (only runs when Pass 1 < DISPLAY_TARGET)
+    #
+    # Priority order inside Pass 2:
+    #   Tier 1 — direct vibe match (user-selected vibes)
+    #   Tier 2 — occasion vibe affinity match
+    #   Tier 3 — occasion tag match only
+    #   Tier 4 — budget/price floor (no other signal)
+    #
+    # Interest hard filter is lifted. Gifts already in
+    # Pass 1 results are excluded by ID.
+    # --------------------------------------------------
+    DISPLAY_TARGET = 5
+
+    if len(scored) < DISPLAY_TARGET and confidence_level == "confident" and request_interests:
+        needed = DISPLAY_TARGET - len(scored)
+        pass1_ids = {str(g.get("id")) for g in scored}
+
+        requested_vibes  = set(request.vibe or []) if request else set()
+        occasion_vibes   = set(OCCASION_VIBE_AFFINITY.get(
+            getattr(request, "occasion", "") or "", []
+        ))
+        request_occasion = getattr(request, "occasion", None) if request else None
+
+        fallback_candidates = []
+        for g, current_price in normalised:
+            if str(g.get("id")) in pass1_ids:
+                continue
+
+            g_vibes     = set(g.get("vibe") or [])
+            g_occasions = set(g.get("occasions") or [])
+
+            if g_vibes & requested_vibes:
+                fallback_tier = 1          # direct vibe match
+            elif g_vibes & occasion_vibes:
+                fallback_tier = 2          # occasion-affinity vibe match
+            elif request_occasion and request_occasion in g_occasions:
+                fallback_tier = 3          # occasion tag match only
+            else:
+                fallback_tier = 4          # budget/price floor
+
+            fallback_candidates.append((fallback_tier, g, current_price))
+
+        fallback_candidates.sort(key=lambda x: x[0])
+
+        added = 0
+        for tier, g, current_price in fallback_candidates:
+            if added >= needed:
+                break
+            _score_gift(g, current_price, is_fallback=True)
+            scored.append(g)
+            added += 1
+            logger.info(
+                f"Pass 2 (tier {tier}) added fallback: '{g.get('display_name')}'"
+            )
+
+    # --------------------------------------------------
+    # DIVERSITY + FINAL SORT
+    # Pass 1 gifts always outrank Pass 2 gifts because
+    # fallback=True gifts get a diversity penalty applied
+    # first, and their raw scores are naturally lower
+    # (no interest overlap boost).
+    # --------------------------------------------------
     scored.sort(key=lambda x: x["score"], reverse=True)
     category_counter = defaultdict(int)
     for gift in scored:
@@ -890,10 +940,14 @@ def retrieve_gifts(
                 break
             category_counter[cat] += 1
 
-    # Final sort and trim
     scored.sort(key=lambda x: x["score"], reverse=True)
-    final_results = scored[:k]
+    final_results = scored[:DISPLAY_TARGET]
     final_results = assign_ranked_confidence(final_results)
 
-    logger.info(f"Final selection: {[f.get('display_name') for f in final_results]}")
+    pass1_count = sum(1 for g in final_results if not g.get("fallback"))
+    pass2_count = sum(1 for g in final_results if g.get("fallback"))
+    logger.info(
+        f"Final selection ({pass1_count} interest-matched, {pass2_count} fallback): "
+        f"{[f.get('display_name') for f in final_results]}"
+    )
     return final_results
