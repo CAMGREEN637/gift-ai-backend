@@ -38,13 +38,13 @@ GENERIC_TOKENS = {
 }
 
 # Threshold tuning note:
-# Previously raised to 0.30 to filter weak semantic matches.
-# Lowered back to 0.22 now that the confident-mode hard interest filter
-# handles topically irrelevant results at the scoring stage. A threshold
-# of 0.30 is too aggressive for niche interest categories (e.g. gardening)
-# where gifts may have slightly lower vector similarity to a noisy query
-# but are still the correct results.
-VECTOR_MATCH_THRESHOLD = 0.22
+# Lowered to 0.15 — text-embedding-3-small returns conservative similarity
+# scores, especially for short queries against long multi-field gift texts.
+# The hard interest filter and confident-mode Pass 1 filter are the real
+# quality gates. This threshold only needs to be low enough that legitimate
+# candidates (e.g. a gardening tool set for a "gardening Christmas gift"
+# query) are not excluded before scoring begins.
+VECTOR_MATCH_THRESHOLD = 0.15
 
 # --------------------------------------------------
 # SCORING WEIGHTS — ORIGINAL (with updates)

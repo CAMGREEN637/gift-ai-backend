@@ -328,11 +328,16 @@ async def recommend(
 
     # ------------------------------------------------------------------
     # CONFIDENCE THRESHOLD FILTER
-    # Lowered to 0.65 now that k=5 — filtering at 0.8 with only 5 candidates
-    # risks returning 0-2 results too often.
+    # Only applied to Pass 1 (interest-matched) gifts. Fallback gifts
+    # from Pass 2 are exempt — they've already been ranked as the best
+    # available when interest-matched results are insufficient. Filtering
+    # them here would leave the user with fewer results than intended.
     # ------------------------------------------------------------------
     original_count = len(gifts)
-    gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
+    gifts = [
+        g for g in gifts
+        if g.get("fallback") or g.get("confidence", 0) >= 0.65
+    ]
     if original_count != len(gifts):
         logger.info(
             f"Filtered out {original_count - len(gifts)} gifts "
