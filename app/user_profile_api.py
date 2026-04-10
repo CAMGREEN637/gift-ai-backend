@@ -22,14 +22,11 @@ router = APIRouter(prefix="/user-profile", tags=["user-profile"])
 class Recipient(BaseModel):
     id: Optional[str] = None
     name: str
-    relationship: Optional[str] = None
+    # Relationship stage from quiz: new / dating / serious / committed / complicated
+    relationship_stage: Optional[str] = None
     birthday: Optional[date] = None
     anniversary: Optional[date] = None
     interests: List[str] = []
-    categories: List[str] = []
-    vibe: List[str] = []
-    personality_traits: List[str] = []
-    experience_level: Optional[str] = None
     preferred_price_range: Optional[str] = None
     notes: Optional[str] = None
     lastGiftDate: Optional[date] = None
@@ -52,8 +49,8 @@ def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
     logger.info("🔑 Received token (first 20 chars): %s..." % token[:20])
 
     try:
-        # Decode without verification to get the payload
-        # Security Note: Verification happens at the Database layer via Supabase RLS
+        # Decode without verification to get the payload.
+        # Security note: verification happens at the DB layer via Supabase RLS.
         unverified_payload = jwt.decode(
             token,
             options={"verify_signature": False, "verify_exp": True}
@@ -85,6 +82,18 @@ def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 
+# --- Helpers ---
+def _serialize_recipient(recipient_dict: dict) -> dict:
+    """
+    Convert date fields to ISO strings and ensure relationship_stage
+    is persisted. Called before writing to the database.
+    """
+    for date_field in ("birthday", "anniversary", "lastGiftDate"):
+        if recipient_dict.get(date_field):
+            recipient_dict[date_field] = str(recipient_dict[date_field])
+    return recipient_dict
+
+
 # --- Endpoints ---
 @router.get("/")
 async def get_profile(
@@ -98,12 +107,8 @@ async def get_profile(
             .eq("user_id", user_id) \
             .execute()
 
-        # If no profile, create one
         if not response.data or len(response.data) == 0:
-            new_profile = {
-                "user_id": user_id,
-                "saved_recipients": []
-            }
+            new_profile = {"user_id": user_id, "saved_recipients": []}
             response = db.table("user_profiles").insert(new_profile).execute()
             return response.data[0]
 
@@ -121,13 +126,11 @@ async def get_recipients(
 ):
     """Get all saved recipients"""
     try:
-        # Don't use .single() - it throws error if no rows
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
             .execute()
 
-        # Check if profile exists
         if not response.data or len(response.data) == 0:
             logger.info("No profile found for user %s, returning empty list" % user_id)
             return []
@@ -149,81 +152,42 @@ async def add_recipient(
 ):
     """Add a new gift recipient"""
     try:
-        # Get current profile (don't use .single())
         response = db.table("user_profiles") \
             .select("saved_recipients") \
             .eq("user_id", user_id) \
             .execute()
 
-        # If no profile exists, create one
+        recipient_id = recipient.id or str(uuid.uuid4())
+        recipient_dict = recipient.dict(exclude_none=True)
+        recipient_dict["id"] = recipient_id
+        recipient_dict["createdAt"] = datetime.now().isoformat()
+        recipient_dict = _serialize_recipient(recipient_dict)
+
         if not response.data or len(response.data) == 0:
-            logger.info("Creating new profile for user %s" % user_id)
-
-            # Generate recipient ID
-            recipient_id = str(uuid.uuid4())
-
-            # Build recipient dict
-            recipient_dict = recipient.dict(exclude_none=True)
-            recipient_dict["id"] = recipient_id
-
-            # Convert dates
-            if recipient_dict.get("birthday"):
-                recipient_dict["birthday"] = str(recipient_dict["birthday"])
-            if recipient_dict.get("anniversary"):
-                recipient_dict["anniversary"] = str(recipient_dict["anniversary"])
-            if recipient_dict.get("lastGiftDate"):
-                recipient_dict["lastGiftDate"] = str(recipient_dict["lastGiftDate"])
-
-            # Add timestamp
-            recipient_dict["createdAt"] = datetime.now().isoformat()
-
-            # Create new profile with this recipient
+            # No profile yet — create one with this recipient
             new_profile = {
                 "user_id": user_id,
                 "saved_recipients": [recipient_dict]
             }
-
             db.table("user_profiles").insert(new_profile).execute()
             logger.info("Created new profile and added recipient: %s" % recipient.name)
             return recipient_dict
 
-        # Profile exists, add to it
+        # Profile exists — append or update by name
         recipients = response.data[0].get("saved_recipients", [])
-
-        # Generate ID if not provided
-        if not recipient.id:
-            recipient.id = str(uuid.uuid4())
-
-        # Convert to dict
-        recipient_dict = recipient.dict(exclude_none=True)
-
-        # Convert dates to strings
-        if recipient_dict.get("birthday"):
-            recipient_dict["birthday"] = str(recipient_dict["birthday"])
-        if recipient_dict.get("anniversary"):
-            recipient_dict["anniversary"] = str(recipient_dict["anniversary"])
-        if recipient_dict.get("lastGiftDate"):
-            recipient_dict["lastGiftDate"] = str(recipient_dict["lastGiftDate"])
-
-        # Add timestamp
-        recipient_dict["createdAt"] = datetime.now().isoformat()
-
-        # Check if recipient with same name exists
         existing_index = next(
-            (i for i, r in enumerate(recipients) if r.get("name", "").lower() == recipient.name.lower()),
+            (i for i, r in enumerate(recipients)
+             if r.get("name", "").lower() == recipient.name.lower()),
             None
         )
 
         if existing_index is not None:
-            # Update existing
             recipients[existing_index] = {**recipients[existing_index], **recipient_dict}
-            logger.info("Updated recipient: %s" % recipient.name)
+            logger.info("Updated existing recipient: %s" % recipient.name)
         else:
-            # Add new
             recipients.append(recipient_dict)
             logger.info("Added new recipient: %s" % recipient.name)
 
-        # Save back to database
         db.table("user_profiles").update({
             "saved_recipients": recipients
         }).eq("user_id", user_id).execute()
@@ -249,10 +213,9 @@ async def get_recipient(
             .execute()
 
         if not response.data or len(response.data) == 0:
-             raise HTTPException(status_code=404, detail="Recipient not found")
+            raise HTTPException(status_code=404, detail="Recipient not found")
 
         recipients = response.data[0].get("saved_recipients", [])
-
         recipient = next((r for r in recipients if r.get("id") == recipient_id), None)
 
         if not recipient:
@@ -282,23 +245,22 @@ async def update_recipient(
             .execute()
 
         if not response.data or len(response.data) == 0:
-             raise HTTPException(status_code=404, detail="Recipient not found")
+            raise HTTPException(status_code=404, detail="Recipient not found")
 
         recipients = response.data[0].get("saved_recipients", [])
-
-        index = next((i for i, r in enumerate(recipients) if r.get("id") == recipient_id), None)
+        index = next(
+            (i for i, r in enumerate(recipients) if r.get("id") == recipient_id),
+            None
+        )
 
         if index is None:
             raise HTTPException(status_code=404, detail="Recipient not found")
 
         recipient_dict = recipient.dict(exclude_none=True)
         recipient_dict["id"] = recipient_id
+        recipient_dict = _serialize_recipient(recipient_dict)
 
-        if recipient_dict.get("birthday"):
-            recipient_dict["birthday"] = str(recipient_dict["birthday"])
-        if recipient_dict.get("anniversary"):
-            recipient_dict["anniversary"] = str(recipient_dict["anniversary"])
-
+        # Merge — preserve fields like createdAt that aren't in the update payload
         recipients[index] = {**recipients[index], **recipient_dict}
 
         db.table("user_profiles").update({
@@ -329,10 +291,9 @@ async def delete_recipient(
             .execute()
 
         if not response.data or len(response.data) == 0:
-             raise HTTPException(status_code=404, detail="Recipient not found")
+            raise HTTPException(status_code=404, detail="Recipient not found")
 
         recipients = response.data[0].get("saved_recipients", [])
-
         new_recipients = [r for r in recipients if r.get("id") != recipient_id]
 
         if len(new_recipients) == len(recipients):
@@ -358,5 +319,5 @@ async def test_auth(user_id: str = Depends(get_current_user_id)):
     return {
         "status": "authenticated",
         "user_id": user_id,
-        "message": "Simplified auth is working!"
+        "message": "Auth is working!"
     }
