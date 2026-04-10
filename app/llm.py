@@ -300,6 +300,8 @@ def generate_gift_response(
     urgency = _get_urgency_label(days)
 
     # --- Humanized target ---
+    # When a recipient name is provided, use it as the primary target label.
+    # The LLM is instructed to use this name naturally in every reason.
     if recipient_name:
         target = recipient_name
     elif relationship:
@@ -318,11 +320,16 @@ def generate_gift_response(
     gift_intelligence  = _build_gift_intelligence_block(occasion, relationship, vibe, confidence)
     reason_instruction = _build_reason_instruction(target, occasion, relationship)
 
+    # --- Determine whether interests are actually available ---
+    # Interest match signal is only meaningful when the user provided interests.
+    # When confidence is 'lost' or interests are empty, suppress the signal entirely
+    # so the LLM doesn't produce "isn't a her known interests gift" copy.
+    has_interests = bool(partner_interests) and confidence != "lost"
+    user_interests_set = set(i.lower().strip() for i in partner_interests) if has_interests else set()
+
     # --- Build sanitized gift context lines ---
-    # Each line is tagged with interest_match: YES/NO so the LLM knows
-    # whether the gift aligns with the user's stated interests and can
-    # adjust its framing accordingly (acknowledge mismatch vs. connect to interest).
-    user_interests_set = set(i.lower().strip() for i in partner_interests)
+    # Each line is optionally tagged with interest_match: YES/NO — but ONLY
+    # when the user actually provided interests. Otherwise the tag is omitted.
     gift_lines = []
     for i, g in enumerate(gifts, 1):
         name      = _sanitize_for_prompt(g.get("name", ""))
@@ -331,16 +338,46 @@ def generate_gift_response(
                     )
         price     = g.get("price", 0)
         vibe_tags = ", ".join(g.get("vibe") or [])
-        gift_interests = set(_normalize_jsonb_to_list(g.get("interests") or []))
-        interest_match = "YES" if (gift_interests & user_interests_set) else "NO"
-        gift_lines.append(
-            f"{i}. {name} (${price}) | vibe: {vibe_tags} | interest_match: {interest_match} | {desc}"
+
+        if has_interests:
+            gift_interests = set(_normalize_jsonb_to_list(g.get("interests") or []))
+            interest_match = "YES" if (gift_interests & user_interests_set) else "NO"
+            gift_lines.append(
+                f"{i}. {name} (${price}) | vibe: {vibe_tags} | interest_match: {interest_match} | {desc}"
+            )
+        else:
+            gift_lines.append(
+                f"{i}. {name} (${price}) | vibe: {vibe_tags} | {desc}"
+            )
+
+    # --- Build interest signal instructions for the prompt ---
+    # Only injected when interests are present. Completely omitted otherwise
+    # so the LLM has no temptation to reference missing interest data.
+    if has_interests:
+        interests_str     = ", ".join(partner_interests[:5])
+        interests_preview = partner_interests[0]
+        interest_signal_block = (
+            f"INTEREST MATCH SIGNAL: Each gift is tagged 'interest_match: YES or NO'.\n"
+            f"- For YES gifts: connect the reason to her known interest naturally — this is what makes it specific.\n"
+            f"- For NO gifts: DO NOT pretend it matches her interest. Open with a brief honest acknowledgment "
+            f"that it isn't an interest match, then justify it on occasion + vibe + stage alone. "
+            f"Example: 'This isn't a {interests_preview} pick, but for a {relationship or 'new'} relationship "
+            f"at {occasion or 'this occasion'} the vibe fits exactly right.'\n\n"
+            f"GOOD (YES): Her interest in {interests_preview} gives this a real hook — it reads as specific rather than a default gesture.\n"
+            f"GOOD (NO): This isn't a {interests_preview} gift, but the cozy vibe is exactly right for a new relationship at Christmas — warm and low-pressure without implying too much.\n"
+        )
+    else:
+        interests_str         = "not specified"
+        interest_signal_block = (
+            # No interest data — anchor everything in occasion + stage + vibe only.
+            # No interest signal tags are present in the gift lines.
+            f"INTEREST NOTE: No interests were provided for this recipient. "
+            f"Do NOT reference or imply anything about her interests. "
+            f"Anchor every reason purely in occasion logic, relationship stage, and vibe.\n"
         )
 
-    # --- System prompt ---
-    # Safe interests preview for inline use in the GOOD example
-    interests_str     = ", ".join(partner_interests[:5]) if partner_interests else "not specified"
-    interests_preview = partner_interests[0] if partner_interests else "her known interests"
+    # --- Safe interests preview for inline use in the GOOD example ---
+    interests_preview = partner_interests[0] if partner_interests else None
 
     system_prompt = (
         f"You are an elite gift advisor helping men feel confident about the gift they're about to buy.\n"
@@ -352,23 +389,21 @@ def generate_gift_response(
         f"BUDGET: {'$' + str(budget) if budget else 'flexible'}\n"
         f"KNOWN INTERESTS: {interests_str}\n\n"
         f"{gift_intelligence}\n\n"
+        f"NAME RULE — THIS IS MANDATORY:\n"
+        f"The recipient's name is '{target}'. You MUST use this name at least once in every single reason. "
+        f"Do not write a reason that only uses 'she' or 'her' without ever saying '{target}'. "
+        f"Example of correct usage: 'Valentine's Day at this stage calls for something warm — "
+        f"this lands in exactly that space for {target}.'\n\n"
         f"RULES:\n"
         f"- You are writing for the BUYER, not about the recipient. Reassure him his choice is right.\n"
         f"- ONLY reference interests explicitly listed in KNOWN INTERESTS. Never invent traits, values, or preferences.\n"
         f"- Anchor every reason in one or more of: (1) occasion logic, (2) relationship stage logic, (3) her known interests. Use only what you actually have.\n"
         f"- If no interests are known, rely on occasion + stage alone. Do not fabricate specificity.\n"
         f"- 2 sentences max per reason. Confident, warm, direct.\n"
-        f"- No phrases like 'perfect gift', 'she will love it', 'timeless', 'cherished', 'lasting elegance'.\n"
-        f"- Use '{target}' naturally where it fits. Do not force it into every sentence.\n\n"
-        f"INTEREST MATCH SIGNAL: Each gift is tagged 'interest_match: YES or NO'.\n"
-        f"- For YES gifts: connect the reason to her known interest naturally — this is what makes it specific.\n"
-        f"- For NO gifts: DO NOT pretend it matches her interest. Open with a brief honest acknowledgment "
-        f"that it isn't an interest match, then justify it on occasion + vibe + stage alone. "
-        f"Example: 'This isn't a {interests_preview} pick, but for a {relationship or 'new'} relationship "
-        f"at {occasion or 'this occasion'} the [vibe] fits exactly right.'\n\n"
-        f"GOOD (YES): Her interest in {interests_preview} gives this a real hook — it reads as specific rather than a default gesture.\n"
-        f"GOOD (NO): This isn't a {interests_preview} gift, but the cozy vibe is exactly right for a new relationship at Christmas — warm and low-pressure without implying too much.\n"
-        f"BAD: This speaks to {target}'s deep appreciation for timeless elegance and lasting beauty.\n\n"
+        f"- No phrases like 'perfect gift', 'she will love it', 'timeless', 'cherished', 'lasting elegance'.\n\n"
+        f"{interest_signal_block}"
+        f"BAD: This speaks to {target}'s deep appreciation for timeless elegance and lasting beauty.\n"
+        f"BAD: A reason that never mentions {target} by name — always use the name at least once.\n\n"
         f"Return valid JSON only. No markdown."
     )
 
