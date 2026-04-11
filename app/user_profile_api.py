@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from datetime import date
 import logging
 import jwt
@@ -22,7 +22,6 @@ router = APIRouter(prefix="/user-profile", tags=["user-profile"])
 class Recipient(BaseModel):
     id: Optional[str] = None
     name: str
-    # Relationship stage from quiz: new / dating / serious / committed / complicated
     relationship_stage: Optional[str] = None
     birthday: Optional[date] = None
     anniversary: Optional[date] = None
@@ -30,6 +29,27 @@ class Recipient(BaseModel):
     preferred_price_range: Optional[str] = None
     notes: Optional[str] = None
     lastGiftDate: Optional[date] = None
+
+
+class SavedGift(BaseModel):
+    """A single gift saved to a recipient's profile."""
+    id: Optional[str] = None
+    name: str
+    display_name: Optional[str] = None
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    product_url: Optional[str] = None
+    reason: Optional[str] = None
+    occasion: Optional[str] = None
+    saved_at: Optional[str] = None
+
+
+class SaveGiftsRequest(BaseModel):
+    """Save one or more gifts to a recipient. Creates the recipient if needed."""
+    recipient_name: str
+    recipient_id: Optional[str] = None
+    gifts: List[Dict[str, Any]]
+    occasion: Optional[str] = None
 
 
 class UserProfile(BaseModel):
@@ -40,80 +60,62 @@ class UserProfile(BaseModel):
 
 # --- Simplified JWT Auth ---
 def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Extract user ID from Supabase JWT token - simplified decoding"""
     if not authorization or not authorization.startswith("Bearer "):
-        logger.error("❌ No Authorization header provided")
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     token = authorization.replace("Bearer ", "")
-    logger.info("🔑 Received token (first 20 chars): %s..." % token[:20])
-
     try:
-        # Decode without verification to get the payload.
-        # Security note: verification happens at the DB layer via Supabase RLS.
         unverified_payload = jwt.decode(
             token,
             options={"verify_signature": False, "verify_exp": True}
         )
-
         user_id = unverified_payload.get("sub")
-
         if not user_id:
-            logger.error("❌ No user ID (sub) found in token payload")
             raise HTTPException(status_code=401, detail="Invalid token - no user ID")
-
-        # Manual expiration check (backup to verify_exp)
         exp = unverified_payload.get("exp")
         if exp and time.time() > exp:
-            logger.error("❌ Token expired based on exp claim")
             raise HTTPException(status_code=401, detail="Token expired")
-
-        logger.info("✅ Extracted user ID: %s" % user_id)
         return user_id
-
     except jwt.ExpiredSignatureError:
-        logger.error("❌ Token expired signature")
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.DecodeError as e:
-        logger.error("❌ JWT Decode error: %s" % str(e))
         raise HTTPException(status_code=401, detail="Invalid token format")
     except Exception as e:
-        logger.error("❌ Auth error: %s" % str(e))
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 
 # --- Helpers ---
 def _serialize_recipient(recipient_dict: dict) -> dict:
-    """
-    Convert date fields to ISO strings and ensure relationship_stage
-    is persisted. Called before writing to the database.
-    """
     for date_field in ("birthday", "anniversary", "lastGiftDate"):
         if recipient_dict.get(date_field):
             recipient_dict[date_field] = str(recipient_dict[date_field])
     return recipient_dict
 
 
+def _get_or_create_profile(user_id: str, db: Client) -> dict:
+    """Fetch the user profile, creating it if it doesn't exist."""
+    response = db.table("user_profiles") \
+        .select("*") \
+        .eq("user_id", user_id) \
+        .execute()
+
+    if not response.data or len(response.data) == 0:
+        new_profile = {"user_id": user_id, "saved_recipients": []}
+        result = db.table("user_profiles").insert(new_profile).execute()
+        return result.data[0]
+
+    return response.data[0]
+
+
 # --- Endpoints ---
+
 @router.get("/")
 async def get_profile(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
-    """Get user's profile"""
     try:
-        response = db.table("user_profiles") \
-            .select("*") \
-            .eq("user_id", user_id) \
-            .execute()
-
-        if not response.data or len(response.data) == 0:
-            new_profile = {"user_id": user_id, "saved_recipients": []}
-            response = db.table("user_profiles").insert(new_profile).execute()
-            return response.data[0]
-
-        return response.data[0]
-
+        return _get_or_create_profile(user_id, db)
     except Exception as e:
         logger.error("Error getting profile: %s" % str(e))
         raise HTTPException(status_code=500, detail=str(e))
@@ -124,7 +126,6 @@ async def get_recipients(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
-    """Get all saved recipients"""
     try:
         response = db.table("user_profiles") \
             .select("saved_recipients") \
@@ -132,13 +133,10 @@ async def get_recipients(
             .execute()
 
         if not response.data or len(response.data) == 0:
-            logger.info("No profile found for user %s, returning empty list" % user_id)
             return []
 
         recipients = response.data[0].get("saved_recipients", [])
-        logger.info("Loaded %d recipients for user %s" % (len(recipients), user_id))
         return recipients
-
     except Exception as e:
         logger.error("Error getting recipients: %s" % str(e))
         return []
@@ -150,7 +148,6 @@ async def add_recipient(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
-    """Add a new gift recipient"""
     try:
         response = db.table("user_profiles") \
             .select("saved_recipients") \
@@ -161,19 +158,17 @@ async def add_recipient(
         recipient_dict = recipient.dict(exclude_none=True)
         recipient_dict["id"] = recipient_id
         recipient_dict["createdAt"] = datetime.now().isoformat()
+        recipient_dict.setdefault("saved_gifts", [])
         recipient_dict = _serialize_recipient(recipient_dict)
 
         if not response.data or len(response.data) == 0:
-            # No profile yet — create one with this recipient
             new_profile = {
                 "user_id": user_id,
                 "saved_recipients": [recipient_dict]
             }
             db.table("user_profiles").insert(new_profile).execute()
-            logger.info("Created new profile and added recipient: %s" % recipient.name)
             return recipient_dict
 
-        # Profile exists — append or update by name
         recipients = response.data[0].get("saved_recipients", [])
         existing_index = next(
             (i for i, r in enumerate(recipients)
@@ -182,11 +177,12 @@ async def add_recipient(
         )
 
         if existing_index is not None:
+            # Preserve saved_gifts when updating
+            existing_gifts = recipients[existing_index].get("saved_gifts", [])
             recipients[existing_index] = {**recipients[existing_index], **recipient_dict}
-            logger.info("Updated existing recipient: %s" % recipient.name)
+            recipients[existing_index]["saved_gifts"] = existing_gifts
         else:
             recipients.append(recipient_dict)
-            logger.info("Added new recipient: %s" % recipient.name)
 
         db.table("user_profiles").update({
             "saved_recipients": recipients
@@ -205,7 +201,6 @@ async def get_recipient(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
-    """Get a specific recipient by ID"""
     try:
         response = db.table("user_profiles") \
             .select("saved_recipients") \
@@ -222,7 +217,6 @@ async def get_recipient(
             raise HTTPException(status_code=404, detail="Recipient not found")
 
         return recipient
-
     except HTTPException:
         raise
     except Exception as e:
@@ -237,7 +231,6 @@ async def update_recipient(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
-    """Update a recipient"""
     try:
         response = db.table("user_profiles") \
             .select("saved_recipients") \
@@ -249,8 +242,7 @@ async def update_recipient(
 
         recipients = response.data[0].get("saved_recipients", [])
         index = next(
-            (i for i, r in enumerate(recipients) if r.get("id") == recipient_id),
-            None
+            (i for i, r in enumerate(recipients) if r.get("id") == recipient_id), None
         )
 
         if index is None:
@@ -260,16 +252,16 @@ async def update_recipient(
         recipient_dict["id"] = recipient_id
         recipient_dict = _serialize_recipient(recipient_dict)
 
-        # Merge — preserve fields like createdAt that aren't in the update payload
+        # Always preserve saved_gifts on PUT
+        existing_gifts = recipients[index].get("saved_gifts", [])
         recipients[index] = {**recipients[index], **recipient_dict}
+        recipients[index]["saved_gifts"] = existing_gifts
 
         db.table("user_profiles").update({
             "saved_recipients": recipients
         }).eq("user_id", user_id).execute()
 
-        logger.info("Updated recipient %s for user %s" % (recipient_id, user_id))
         return recipients[index]
-
     except HTTPException:
         raise
     except Exception as e:
@@ -283,7 +275,6 @@ async def delete_recipient(
         user_id: str = Depends(get_current_user_id),
         db: Client = Depends(get_db)
 ):
-    """Delete a recipient"""
     try:
         response = db.table("user_profiles") \
             .select("saved_recipients") \
@@ -303,9 +294,7 @@ async def delete_recipient(
             "saved_recipients": new_recipients
         }).eq("user_id", user_id).execute()
 
-        logger.info("Deleted recipient %s for user %s" % (recipient_id, user_id))
         return {"status": "deleted", "recipient_id": recipient_id}
-
     except HTTPException:
         raise
     except Exception as e:
@@ -313,11 +302,150 @@ async def delete_recipient(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# =============================================================================
+# SAVED GIFTS ENDPOINTS
+# Gifts are stored inside the matching recipient object as saved_gifts[].
+# If no recipient_id is provided, we match by name or create a new one.
+# =============================================================================
+
+@router.post("/saved-gifts")
+async def save_gifts(
+        body: SaveGiftsRequest,
+        user_id: str = Depends(get_current_user_id),
+        db: Client = Depends(get_db)
+):
+    """
+    Save one or more gifts against a recipient.
+    Creates the recipient profile entry if it doesn't exist yet.
+    Deduplicates by product_url — saving the same gift twice is a no-op.
+    """
+    try:
+        profile = _get_or_create_profile(user_id, db)
+        recipients = profile.get("saved_recipients", [])
+
+        # Find the recipient
+        recipient_index = None
+        if body.recipient_id:
+            recipient_index = next(
+                (i for i, r in enumerate(recipients) if r.get("id") == body.recipient_id),
+                None
+            )
+        if recipient_index is None:
+            recipient_index = next(
+                (i for i, r in enumerate(recipients)
+                 if r.get("name", "").lower() == body.recipient_name.lower()),
+                None
+            )
+
+        # Create recipient entry if not found
+        if recipient_index is None:
+            new_recipient = {
+                "id":           body.recipient_id or str(uuid.uuid4()),
+                "name":         body.recipient_name,
+                "createdAt":    datetime.now().isoformat(),
+                "saved_gifts":  [],
+            }
+            recipients.append(new_recipient)
+            recipient_index = len(recipients) - 1
+
+        recipient = recipients[recipient_index]
+        existing_gifts: list = recipient.get("saved_gifts", [])
+
+        # Deduplicate by product_url, fall back to name
+        def is_duplicate(new_gift: dict) -> bool:
+            new_url = new_gift.get("product_url") or new_gift.get("link")
+            for eg in existing_gifts:
+                if new_url and eg.get("product_url") == new_url:
+                    return True
+                if eg.get("name", "").lower() == new_gift.get("name", "").lower():
+                    return True
+            return False
+
+        added = []
+        for gift in body.gifts:
+            if is_duplicate(gift):
+                continue
+            entry = {
+                "id":           str(uuid.uuid4()),
+                "name":         gift.get("name", ""),
+                "display_name": gift.get("display_name"),
+                "price":        gift.get("price"),
+                "image_url":    gift.get("image_url"),
+                "product_url":  gift.get("product_url") or gift.get("link"),
+                "reason":       gift.get("reason"),
+                "occasion":     body.occasion,
+                "saved_at":     datetime.now().isoformat(),
+            }
+            existing_gifts.append(entry)
+            added.append(entry)
+
+        recipients[recipient_index]["saved_gifts"] = existing_gifts
+
+        db.table("user_profiles").update({
+            "saved_recipients": recipients
+        }).eq("user_id", user_id).execute()
+
+        logger.info(
+            "Saved %d gift(s) for recipient '%s' (user %s)"
+            % (len(added), body.recipient_name, user_id)
+        )
+        return {
+            "saved": len(added),
+            "skipped_duplicates": len(body.gifts) - len(added),
+            "gifts": added,
+            "recipient_id": recipients[recipient_index]["id"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error saving gifts: %s" % str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/saved-gifts/{recipient_id}/{gift_id}")
+async def unsave_gift(
+        recipient_id: str,
+        gift_id: str,
+        user_id: str = Depends(get_current_user_id),
+        db: Client = Depends(get_db)
+):
+    """Remove a single saved gift from a recipient."""
+    try:
+        response = db.table("user_profiles") \
+            .select("saved_recipients") \
+            .eq("user_id", user_id) \
+            .execute()
+
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        recipients = response.data[0].get("saved_recipients", [])
+        r_index = next(
+            (i for i, r in enumerate(recipients) if r.get("id") == recipient_id), None
+        )
+        if r_index is None:
+            raise HTTPException(status_code=404, detail="Recipient not found")
+
+        saved_gifts = recipients[r_index].get("saved_gifts", [])
+        new_gifts = [g for g in saved_gifts if g.get("id") != gift_id]
+
+        if len(new_gifts) == len(saved_gifts):
+            raise HTTPException(status_code=404, detail="Gift not found")
+
+        recipients[r_index]["saved_gifts"] = new_gifts
+        db.table("user_profiles").update({
+            "saved_recipients": recipients
+        }).eq("user_id", user_id).execute()
+
+        return {"status": "removed", "gift_id": gift_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error unsaving gift: %s" % str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/test-auth")
 async def test_auth(user_id: str = Depends(get_current_user_id)):
-    """Test endpoint to verify authentication"""
-    return {
-        "status": "authenticated",
-        "user_id": user_id,
-        "message": "Auth is working!"
-    }
+    return {"status": "authenticated", "user_id": user_id}
