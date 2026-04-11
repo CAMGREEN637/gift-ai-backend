@@ -61,46 +61,34 @@ SHIPPING_LATE_PENALTY    = -20
 PRICE_FLOOR_RATIO        = 0.08
 PRICE_FLOOR_MAX_BUDGET   = 2000
 
-# FIX #2: Minimum vector similarity for full scoring.
+# Minimum vector similarity for full scoring.
 # Gifts below this threshold still enter the loop (they passed VECTOR_MATCH_THRESHOLD)
 # but have price affinity suppressed and intent score capped to 1 match worth of points.
-# This prevents weak semantic matches from accumulating full bonus scores.
 MIN_VECTOR_SCORE_FOR_FULL_SCORING = 0.35
 
-# FIX #3: Additional penalty applied when confidence == "confident" and
+# Additional penalty applied when confidence == "confident" and
 # the gift's interests have zero overlap with the user's requested interests.
-# Prevents topically irrelevant gifts from surviving on generic token hits.
-# ↑ doubled from -40 → -80 for stronger signal in confident mode
 CONFIDENT_INTEREST_MISMATCH_PENALTY = -80
 
 # --------------------------------------------------
 # SCORING WEIGHTS — NEW QUIZ SIGNALS
-# Additive on top of the original scoring system.
-# Scaled by 30x at the end to be ~15% of total score range.
 # --------------------------------------------------
 
-WEIGHT_VECTOR_SIMILARITY = 0.25  # Fix #5 — always use vector sim in final score
+WEIGHT_VECTOR_SIMILARITY = 0.25
 WEIGHT_VIBE_MATCH        = 0.20
 WEIGHT_INTEREST_MATCH    = 0.20
-WEIGHT_OVERLAP_BONUS     = 0.12  # Fix #2 — proportional, not flat
+WEIGHT_OVERLAP_BONUS     = 0.12
 WEIGHT_OCCASION_MATCH    = 0.10
-MALE_SKEW_PENALTY        = 0.15  # Fix #1 — soft penalty, not hard filter
+MALE_SKEW_PENALTY        = 0.15
 
 # --------------------------------------------------
 # NICHE INTEREST HARD FILTER
-# Gift interests that should ONLY appear in results
-# if the user explicitly selected that interest.
-# Prevents e.g. "dog mom candle" from appearing for
-# someone who never indicated they have a pet.
-# Add to this set as new niche tags are introduced.
 # --------------------------------------------------
 
 NICHE_INTEREST_TAGS: Set[str] = {"pets"}
 
 # --------------------------------------------------
 # OCCASION → VIBE AFFINITY
-# Boosts gifts whose vibe aligns with the occasion
-# even if the user didn't explicitly select that vibe
 # --------------------------------------------------
 
 OCCASION_VIBE_AFFINITY: Dict[str, List[str]] = {
@@ -118,8 +106,6 @@ APOLOGY_PRICE_CEILING = 150.0
 
 # --------------------------------------------------
 # CONFIDENCE LEVEL MULTIPLIERS
-# Adjusts how much quiz signals are weighted based on
-# how well the user knows her interests
 # --------------------------------------------------
 
 CONFIDENCE_MULTIPLIERS = {
@@ -219,7 +205,6 @@ def tokenize(text: str) -> Set[str]:
     if not text:
         return set()
     tokens = re.split(r"\W+", text.lower())
-    # Raised minimum token length from 2 → 3 to filter out even more noise
     return {t for t in tokens if len(t) > 3}
 
 
@@ -284,25 +269,7 @@ def compute_price_affinity_bonus(
         return 0.0
 
 
-# --------------------------------------------------
-# QUERY BUILDER
-# Builds a natural language query string for embedding
-# from the new quiz signals (occasion, stage, vibe, interests)
-# --------------------------------------------------
-
 def build_search_query(request: RecommendRequest) -> str:
-    """
-    Constructs a retrieval-optimised query for the embedding model.
-
-    Design principles:
-    - When confidence is "confident", interests lead the query so the embedding
-      anchors to the interest domain first. Occasion follows as context only.
-    - Vibe expansion phrases are intentionally excluded — they contain many words
-      that live in GENERIC_TOKENS and dilute the interest signal in the embedding.
-      Vibes are applied at scoring time via compute_quiz_signal_score instead.
-    - Price tier labels are dropped — they don't help retrieval and were adding
-      noisy generic adjectives (premium, luxury, high-end) to the query.
-    """
     parts = []
 
     occasion_phrases = {
@@ -315,17 +282,12 @@ def build_search_query(request: RecommendRequest) -> str:
         "apology":      "apology gift sincere",
     }
 
-    # Confident mode: interests lead so the embedding anchors to the right domain.
-    # Without this, a query like "birthday gift ... gardening" buries the key term
-    # after a wall of boilerplate and returns almost no candidates.
     if request.confidence == "confident" and request.interests:
         parts.append(" ".join(request.interests[:5]))
         if request.overlap_interests:
             parts.append(" ".join(request.overlap_interests))
         parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
-
     else:
-        # Default order: occasion -> relationship stage -> interests
         parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
 
         stage_phrases = {
@@ -338,7 +300,6 @@ def build_search_query(request: RecommendRequest) -> str:
         if request.relationship_stage:
             parts.append(stage_phrases.get(request.relationship_stage, ""))
 
-        # Interests — skip when confidence is 'lost' (user doesn't know her interests)
         if request.confidence != "lost" and request.interests:
             parts.append(" ".join(request.interests[:5]))
 
@@ -349,7 +310,7 @@ def build_search_query(request: RecommendRequest) -> str:
 
 
 # --------------------------------------------------
-# ORIGINAL SCORING (updated)
+# ORIGINAL SCORING
 # --------------------------------------------------
 
 def compute_enhanced_score(
@@ -360,10 +321,8 @@ def compute_enhanced_score(
     partner_profile: Optional[Dict],
     partner_gift_history: List[str],
     confidence_level: str = "somewhat",
-    # when True, cap intent score to 1 match worth of points
     weak_vector_match: bool = False,
 ) -> Dict:
-    # Support both old column name (categories) and new (gift_type)
     g_interests  = gift.get("interests") or []
     g_categories = gift.get("gift_type") or gift.get("categories") or []
     g_vibes      = gift.get("vibe") or []
@@ -377,22 +336,16 @@ def compute_enhanced_score(
 
     matched_intent = [t for t in meaningful_intent_tokens if t in gift_text]
 
-    # FIX #2: cap intent score to 1 match worth of points for weak vector matches,
-    # preventing generic token hits in unrelated descriptions from inflating score.
     effective_intent_count = min(len(matched_intent), 1) if weak_vector_match else len(matched_intent)
     intent_score = effective_intent_count * INTENT_WEIGHT
 
     user_interests = [i.lower().strip() for i in preferences.get("interests", []) if i]
 
-    # Direct set intersection for exact interest overlap
     interest_overlap = set(g_interests) & set(user_interests)
     session_score = len(interest_overlap) * SESSION_WEIGHT
 
-    # Exact interest overlap bonus — rewards gifts that directly match the
-    # user's stated interests beyond the per-match SESSION_WEIGHT points
     exact_boost = 50 if interest_overlap else 0
 
-    # Broad token-level matching (kept for backward compat and non-exact hits)
     gift_tag_blob = " ".join(g_interests + g_categories).lower()
     gift_tag_tokens = set(gift_tag_blob.split())
 
@@ -424,8 +377,6 @@ def compute_enhanced_score(
         except Exception as e:
             logger.warning(f"Could not fetch feedback for scoring: {e}")
 
-    # Ignored Intent Penalty
-    # If user asked for specifics and the gift matches none, tank the score
     intent_penalty = 0
     if (len(meaningful_intent_tokens) > 0
             and len(matched_intent) == 0
@@ -435,16 +386,6 @@ def compute_enhanced_score(
             f"Penalized {gift.get('name')} for ignoring intent tokens: "
             f"{meaningful_intent_tokens}"
         )
-
-    # FIX #3 (removed): The confident-mode interest mismatch penalty (-80) was
-    # previously applied here to prevent topically unrelated gifts from scoring
-    # well. It is no longer needed because:
-    #   - Pass 1's hard filter already excludes zero-overlap gifts before scoring.
-    #   - Pass 2 explicitly scores those excluded gifts as fallbacks, and applying
-    #     -80 to them would produce large negative scores that skew logs and any
-    #     downstream display of score strength.
-    # Segregation between interest-matched and fallback gifts is handled cleanly
-    # by the two-pass structure and the `fallback` flag on each result.
 
     total_boost = (
         intent_score + session_score + exact_boost + profile_score
@@ -472,7 +413,6 @@ def compute_confidence(vector_similarity: float, intent_match_count: int) -> flo
 
 def assign_ranked_confidence(results: List[Dict]) -> List[Dict]:
     for i, gift in enumerate(results):
-        # Don't give a rank-based confidence boost to items that missed intent
         if gift.get("missed_intent", False):
             continue
         rank_confidence = max(0.65, round(0.90 - (i * 0.02), 2))
@@ -482,9 +422,6 @@ def assign_ranked_confidence(results: List[Dict]) -> List[Dict]:
 
 # --------------------------------------------------
 # NEW QUIZ-SIGNAL SCORING
-# Runs alongside the original scoring when a full
-# RecommendRequest is available. Returns an additive
-# score that is scaled before being added to final_score.
 # --------------------------------------------------
 
 def compute_quiz_signal_score(
@@ -492,10 +429,6 @@ def compute_quiz_signal_score(
     request: RecommendRequest,
     conf_multipliers: Dict,
 ) -> float:
-    """
-    Returns a normalized boost (0.0–~1.5) from quiz signals.
-    Caller scales this by 30 before adding to the original score range.
-    """
     score = 0.0
 
     g_vibes     = gift.get("vibe") or []
@@ -504,15 +437,12 @@ def compute_quiz_signal_score(
     gender_skew = gift.get("gender_skew") or "unisex"
     gift_price  = float(gift.get("price") or 0)
 
-    # Fix #1: soft penalty for male-skewing gifts, not a hard filter
     if gender_skew == "male":
         score -= MALE_SKEW_PENALTY
 
-    # Fix #5: always include vector similarity in the score
     vec_sim = float(gift.get("similarity") or 0)
     score += WEIGHT_VECTOR_SIMILARITY * vec_sim
 
-    # Vibe match — user-selected vibes + occasion affinity vibes combined
     requested_vibes = list(request.vibe or [])
     occasion_vibes  = OCCASION_VIBE_AFFINITY.get(request.occasion or "", [])
     all_vibes       = list(set(requested_vibes + occasion_vibes))
@@ -522,7 +452,6 @@ def compute_quiz_signal_score(
         vibe_score   = matched_vibe / max(len(g_vibes), 1)
         score += WEIGHT_VIBE_MATCH * vibe_score * conf_multipliers["vibe"]
 
-    # Interest match — skipped entirely when confidence is 'lost'
     if conf_multipliers["interest"] > 0:
         requested_interests = list(request.interests or [])
         overlap_interests   = list(request.overlap_interests or [])
@@ -532,19 +461,16 @@ def compute_quiz_signal_score(
             interest_score   = matched_interest / max(len(g_interests), 1)
             score += WEIGHT_INTEREST_MATCH * interest_score * conf_multipliers["interest"]
 
-        # Fix #2: proportional overlap bonus
         if g_interests and overlap_interests:
             overlap_matched = sum(1 for i in g_interests if i in overlap_interests)
             if overlap_matched > 0:
                 overlap_score = overlap_matched / max(len(g_interests), 1)
                 score += WEIGHT_OVERLAP_BONUS * overlap_score * conf_multipliers["overlap"]
 
-    # Occasion match
     if request.occasion and g_occasions:
         if request.occasion in g_occasions:
             score += WEIGHT_OCCASION_MATCH
 
-    # Relationship stage adjustments
     if request.relationship_stage:
         score += _relationship_stage_bonus(
             request.relationship_stage, g_vibes, gift_price, request
@@ -559,7 +485,6 @@ def _relationship_stage_bonus(
     gift_price: float,
     request: RecommendRequest,
 ) -> float:
-    """Small score adjustments based on relationship stage."""
     bonus = 0.0
 
     if stage == "new":
@@ -610,47 +535,22 @@ def retrieve_gifts(
     partner_profile: Optional[Dict] = None,
     partner_gift_history: Optional[List[str]] = None,
     request: Optional[RecommendRequest] = None,
+    k: int = 5,
 ) -> List[Dict]:
     """
     Main retrieval function.
 
-    Combines two scoring systems:
-      1. Original: intent tokens, broad interests, profile matching,
-         feedback history, novelty, price affinity, shipping timing
-      2. New quiz signals (additive, only when `request` is provided):
-         vibe, occasion, relationship stage, confidence routing,
-         interest matching, overlap interest boost, gender skew penalty
+    Two-pass scoring system:
+      Pass 1 — interest-matched gifts only (hard filter in confident mode)
+      Pass 2 — vibe/occasion fallbacks when Pass 1 yields fewer than k results
 
-    The `request` parameter is optional for full backward compatibility.
-    All existing callers that pass only `query` continue to work unchanged.
-
-    Changes in this version:
-      - VECTOR_WEIGHT reduced from 60 → 35; SESSION_WEIGHT increased from
-        35 → 80 to make direct interest overlap the dominant signal.
-      - GENERIC_TOKENS expanded with vibe-adjacent words that polluted the
-        intent token set (cozy, warm, luxury, premium, etc.)
-      - FIX #1: VECTOR_MATCH_THRESHOLD raised from 0.15 → 0.30 to filter
-        weak semantic matches before scoring begins.
-      - FIX #2: MIN_VECTOR_SCORE_FOR_FULL_SCORING = 0.35 gate — gifts below
-        this threshold have intent score capped to 1 match and price affinity
-        suppressed, preventing generic token hits from inflating their score.
-      - FIX #3: confident-mode interest mismatch penalty doubled to -80 and
-        now uses exact set intersection rather than broad token matching.
-        Additionally, a HARD FILTER removes gifts with zero interest overlap
-        entirely in confident mode before scoring, so no scoring trick can
-        resurface a topically unrelated gift.
-      - FIX #4: price affinity relevance gate tightened to require ≥2 intent
-        token matches, or 1 intent match + ≥1 broad interest match.
-      - exact_boost (+50) added inside compute_enhanced_score when the gift
-        has direct interest overlap with the user's stated interests.
-      - NICHE FILTER: gifts tagged with niche interests (e.g. "pets") are hard-
-        filtered out unless the user explicitly selected that interest.
+    k controls the number of results returned. Defaults to 5.
+    Passed as a keyword argument from main.py to support load-more.
     """
     preferences = normalize_preferences(preferences)
     meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
     partner_gift_history = partner_gift_history or []
 
-    # Determine confidence multipliers for quiz signal scoring
     confidence_level = "somewhat"
     if request is not None:
         confidence_level = getattr(request, "confidence", None) or "somewhat"
@@ -658,15 +558,12 @@ def retrieve_gifts(
         confidence_level, CONFIDENCE_MULTIPLIERS["somewhat"]
     )
 
-    # Apply apology price ceiling (overrides passed max_price if lower)
     effective_max = max_price
     if request is not None and getattr(request, "occasion", None) == "apology":
         effective_max = min(max_price or 999999, APOLOGY_PRICE_CEILING)
 
-    # Build the set of niche interests the user DID select, for filter use below
     user_interests_set = set(preferences.get("interests", []))
 
-    # Resolve request_interests for confident-mode filtering and penalty
     request_interests: Optional[List[str]] = None
     if request is not None and confidence_level == "confident":
         request_interests = list(request.interests or [])
@@ -705,9 +602,6 @@ def retrieve_gifts(
 
     # --------------------------------------------------
     # NORMALISE RAW GIFTS ONCE
-    # Both passes operate on this shared normalised list.
-    # Price/niche filters are applied here so neither pass
-    # has to repeat that logic.
     # --------------------------------------------------
     normalised = []
     for g in raw_gifts:
@@ -726,18 +620,15 @@ def retrieve_gifts(
         except (ValueError, TypeError):
             current_price = 0.0
 
-        # Hard price ceiling
         if effective_max is not None and current_price > effective_max:
             continue
 
-        # Price floor
         if (effective_max is not None
                 and effective_max <= PRICE_FLOOR_MAX_BUDGET
                 and current_price > 0
                 and current_price < effective_max * PRICE_FLOOR_RATIO):
             continue
 
-        # Niche interest hard filter (applies to both passes)
         gift_interests_set = set(g.get("interests") or [])
         unselected_niche = (NICHE_INTEREST_TAGS & gift_interests_set) - (NICHE_INTEREST_TAGS & user_interests_set)
         if unselected_niche:
@@ -747,14 +638,10 @@ def retrieve_gifts(
             )
             continue
 
-        # Store price alongside the gift as a tuple — avoids mutating the
-        # raw DB dict with a hidden _price key that would confuse callers.
         normalised.append((g, current_price))
 
     # --------------------------------------------------
     # SHARED SCORING HELPER
-    # Scores a single gift and attaches result fields.
-    # Used by both Pass 1 and Pass 2.
     # --------------------------------------------------
     def _score_gift(g: Dict, current_price: float, is_fallback: bool = False) -> Dict:
         vec_sim = float(g.get("similarity") or 0)
@@ -845,8 +732,7 @@ def retrieve_gifts(
         return g
 
     # --------------------------------------------------
-    # PASS 1 — Confident-mode interest hard filter active
-    # Only gifts with direct interest overlap are scored.
+    # PASS 1 — interest hard filter active in confident mode
     # --------------------------------------------------
     scored = []
     for g, current_price in normalised:
@@ -865,21 +751,10 @@ def retrieve_gifts(
     logger.info(f"Pass 1 yielded {len(scored)} interest-matched gifts")
 
     # --------------------------------------------------
-    # PASS 2 — Fallback (only runs when Pass 1 < DISPLAY_TARGET)
-    #
-    # Priority order inside Pass 2:
-    #   Tier 1 — direct vibe match (user-selected vibes)
-    #   Tier 2 — occasion vibe affinity match
-    #   Tier 3 — occasion tag match only
-    #   Tier 4 — budget/price floor (no other signal)
-    #
-    # Interest hard filter is lifted. Gifts already in
-    # Pass 1 results are excluded by ID.
+    # PASS 2 — fallback (only when Pass 1 < k)
     # --------------------------------------------------
-    DISPLAY_TARGET = 5
-
-    if len(scored) < DISPLAY_TARGET and confidence_level == "confident" and request_interests:
-        needed = DISPLAY_TARGET - len(scored)
+    if len(scored) < k and confidence_level == "confident" and request_interests:
+        needed = k - len(scored)
         pass1_ids = {str(g.get("id")) for g in scored}
 
         requested_vibes  = set(request.vibe or []) if request else set()
@@ -897,23 +772,17 @@ def retrieve_gifts(
             g_occasions = set(g.get("occasions") or [])
 
             if g_vibes & requested_vibes:
-                fallback_tier = 1          # direct vibe match
+                fallback_tier = 1
             elif g_vibes & occasion_vibes:
-                fallback_tier = 2          # occasion-affinity vibe match
+                fallback_tier = 2
             elif request_occasion and request_occasion in g_occasions:
-                fallback_tier = 3          # occasion tag match only
+                fallback_tier = 3
             else:
-                fallback_tier = 4          # budget/price floor
+                fallback_tier = 4
 
-            # Include vector similarity as a secondary sort key.
-            # Within each tier, gifts with higher semantic similarity to the
-            # query (i.e. more interest-adjacent) rank above pure vibe matches.
             sim_score = float(g.get("similarity") or 0)
             fallback_candidates.append((fallback_tier, sim_score, g, current_price))
 
-        # Sort by tier ascending, then similarity descending within each tier.
-        # This organically surfaces interest-adjacent gifts (e.g. botanical candle)
-        # above unrelated vibe matches (e.g. cashmere throw) within the same tier.
         fallback_candidates.sort(key=lambda x: (x[0], -x[1]))
 
         added = 0
@@ -929,10 +798,6 @@ def retrieve_gifts(
 
     # --------------------------------------------------
     # DIVERSITY + FINAL SORT
-    # Pass 1 gifts always outrank Pass 2 gifts because
-    # fallback=True gifts get a diversity penalty applied
-    # first, and their raw scores are naturally lower
-    # (no interest overlap boost).
     # --------------------------------------------------
     scored.sort(key=lambda x: x["score"], reverse=True)
     category_counter = defaultdict(int)
@@ -945,7 +810,7 @@ def retrieve_gifts(
             category_counter[cat] += 1
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    final_results = scored[:DISPLAY_TARGET]
+    final_results = scored[:k]
     final_results = assign_ranked_confidence(final_results)
 
     pass1_count = sum(1 for g in final_results if not g.get("fallback"))

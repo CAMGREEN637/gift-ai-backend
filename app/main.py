@@ -317,16 +317,16 @@ async def recommend(
     t_retrieval = time.time()
     gifts = await asyncio.to_thread(
         retrieve_gifts,
-        query,               # built from quiz signals
-        user_id,
-        k,
+        query,               # positional 1
+        user_id,             # positional 2
         None,                # min_price — not used in new quiz schema
-        max_price,
-        days_until_needed,
-        merged_preferences,
-        partner_profile,
-        partner_gift_history,
-        body,                # full request for quiz signal scoring
+        max_price,           # positional 4
+        days_until_needed,   # positional 5
+        merged_preferences,  # positional 6
+        partner_profile,     # positional 7
+        partner_gift_history,# positional 8
+        request=body,        # keyword
+        k=k,                 # keyword — controls result count incl. load more
     )
     logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
