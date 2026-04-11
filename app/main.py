@@ -309,13 +309,17 @@ async def recommend(
     # ------------------------------------------------------------------
     # RETRIEVE GIFTS
     # Pass full RecommendRequest as `request` to activate quiz scoring.
-    # k has been removed from retrieve_gifts — it always returns 5 results.
+    # All other params unchanged from original.
     # ------------------------------------------------------------------
+    # k — use request override (load more) or default to 5
+    k = body.k if body.k and 1 <= body.k <= 20 else 5
+
     t_retrieval = time.time()
     gifts = await asyncio.to_thread(
         retrieve_gifts,
         query,               # built from quiz signals
-        user_id,             # user_id
+        user_id,
+        k,
         None,                # min_price — not used in new quiz schema
         max_price,
         days_until_needed,
@@ -327,17 +331,19 @@ async def recommend(
     logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
     # ------------------------------------------------------------------
+    # EXCLUDE already-shown gifts (load more support)
+    # ------------------------------------------------------------------
+    exclude_names = [n.lower() for n in (body.exclude_names or [])]
+    if exclude_names:
+        before = len(gifts)
+        gifts = [g for g in gifts if g.get("name", "").lower() not in exclude_names]
+        logger.info(f"Excluded {before - len(gifts)} already-shown gifts")
+
+    # ------------------------------------------------------------------
     # CONFIDENCE THRESHOLD FILTER
-    # Only applied to Pass 1 (interest-matched) gifts. Fallback gifts
-    # from Pass 2 are exempt — they've already been ranked as the best
-    # available when interest-matched results are insufficient. Filtering
-    # them here would leave the user with fewer results than intended.
     # ------------------------------------------------------------------
     original_count = len(gifts)
-    gifts = [
-        g for g in gifts
-        if g.get("fallback") or g.get("confidence", 0) >= 0.65
-    ]
+    gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
     if original_count != len(gifts):
         logger.info(
             f"Filtered out {original_count - len(gifts)} gifts "

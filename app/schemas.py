@@ -1,4 +1,3 @@
-#schemas.py
 """
 Gift AI — Pydantic Schemas
 Updated to reflect the new quiz structure:
@@ -101,6 +100,12 @@ class RecommendRequest(BaseModel):
     # Legacy field — kept for backward compatibility with saved partner profiles
     # Deprecated: use relationship_stage instead
     recipient: Optional[dict] = None
+
+    # Load more — names of already-shown gifts to exclude from next batch
+    exclude_names: Optional[List[str]] = Field(default_factory=list)
+
+    # Override for k (number of results) — defaults to 5 in main.py
+    k: Optional[int] = None
 
     class Config:
         use_enum_values = True
