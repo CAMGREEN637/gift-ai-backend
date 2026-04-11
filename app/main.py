@@ -311,44 +311,45 @@ async def recommend(
     # Pass full RecommendRequest as `request` to activate quiz scoring.
     # All other params unchanged from original.
     # ------------------------------------------------------------------
-    # k — use request override (load more) or default to 5
-    k = body.k if body.k and 1 <= body.k <= 20 else 5
+    # k — for load-more (exclude_names present), request base_k + exclusion count
+    # so after stripping already-shown gifts we still have base_k results.
+    # For normal requests, just use base_k.
+    base_k = body.k if body.k and 1 <= body.k <= 20 else 5
+    exclude_names_lower = [n.lower() for n in (body.exclude_names or [])]
+    k = base_k + len(exclude_names_lower)
 
     t_retrieval = time.time()
     gifts = await asyncio.to_thread(
         retrieve_gifts,
-        query,               # positional 1
-        user_id,             # positional 2
-        None,                # min_price — not used in new quiz schema
-        max_price,           # positional 4
-        days_until_needed,   # positional 5
-        merged_preferences,  # positional 6
-        partner_profile,     # positional 7
-        partner_gift_history,# positional 8
-        request=body,        # keyword
-        k=k,                 # keyword — controls result count incl. load more
+        query,
+        user_id,
+        None,                # min_price
+        max_price,
+        days_until_needed,
+        merged_preferences,
+        partner_profile,
+        partner_gift_history,
+        request=body,
+        k=k,
     )
     logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
-    # ------------------------------------------------------------------
-    # EXCLUDE already-shown gifts (load more support)
-    # ------------------------------------------------------------------
-    exclude_names = [n.lower() for n in (body.exclude_names or [])]
-    if exclude_names:
+    # Strip already-shown gifts (load more) and trim to base_k
+    if exclude_names_lower:
         before = len(gifts)
-        gifts = [g for g in gifts if g.get("name", "").lower() not in exclude_names]
-        logger.info(f"Excluded {before - len(gifts)} already-shown gifts")
+        gifts = [g for g in gifts if g.get("name", "").lower() not in exclude_names_lower]
+        logger.info(f"Load more: stripped {before - len(gifts)} already-shown, {len(gifts)} remain")
+        gifts = gifts[:base_k]
 
     # ------------------------------------------------------------------
     # CONFIDENCE THRESHOLD FILTER
+    # Skipped for load-more — positions 6-10 are intentionally lower-ranked.
     # ------------------------------------------------------------------
-    original_count = len(gifts)
-    gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
-    if original_count != len(gifts):
-        logger.info(
-            f"Filtered out {original_count - len(gifts)} gifts "
-            f"below the 65% confidence threshold."
-        )
+    if not exclude_names_lower:
+        original_count = len(gifts)
+        gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
+        if original_count != len(gifts):
+            logger.info(f"Filtered out {original_count - len(gifts)} gifts below 65% confidence")
 
     # ------------------------------------------------------------------
     # SESSION CONTEXT FOR LLM

@@ -322,6 +322,7 @@ def compute_enhanced_score(
     partner_gift_history: List[str],
     confidence_level: str = "somewhat",
     weak_vector_match: bool = False,
+    feedback_lookup: Optional[Dict[str, int]] = None,
 ) -> Dict:
     g_interests  = gift.get("interests") or []
     g_categories = gift.get("gift_type") or gift.get("categories") or []
@@ -368,14 +369,8 @@ def compute_enhanced_score(
     history_penalty = -50 if str(gift.get("id")) in [str(id) for id in partner_gift_history] else 0
 
     feedback_score = 0
-    if user_id:
-        try:
-            history = get_feedback(user_id)
-            for entry in history:
-                if entry.get("gift_name") == gift.get("name"):
-                    feedback_score += 15 if entry.get("liked") else -25
-        except Exception as e:
-            logger.warning(f"Could not fetch feedback for scoring: {e}")
+    if feedback_lookup:
+        feedback_score = feedback_lookup.get(gift.get("name", ""), 0)
 
     intent_penalty = 0
     if (len(meaningful_intent_tokens) > 0
@@ -568,6 +563,20 @@ def retrieve_gifts(
     if request is not None and confidence_level == "confident":
         request_interests = list(request.interests or [])
 
+    # Fetch feedback history once — avoids N+1 Supabase queries inside _score_gift
+    feedback_lookup: Dict[str, int] = {}
+    if user_id:
+        try:
+            history = get_feedback(user_id)
+            for entry in history:
+                name = entry.get("gift_name", "")
+                if name:
+                    feedback_lookup[name] = feedback_lookup.get(name, 0) + (
+                        15 if entry.get("liked") else -25
+                    )
+        except Exception as e:
+            logger.warning(f"Could not fetch feedback history: {e}")
+
     try:
         supabase = get_supabase_client()
 
@@ -654,6 +663,7 @@ def retrieve_gifts(
             user_id, partner_profile, partner_gift_history,
             confidence_level=confidence_level,
             weak_vector_match=weak_vector_match,
+            feedback_lookup=feedback_lookup,
         )
 
         novelty_score = (
