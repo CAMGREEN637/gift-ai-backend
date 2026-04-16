@@ -8,11 +8,18 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Depends, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import json
 import httpx
 import logging
+from datetime import datetime, timezone
+
+from fastapi.exceptions import RequestValidationError
+from starlette.requests import Request
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from app.retrieval import retrieve_gifts, build_search_query, get_results_headline
 from app.llm import generate_gift_response
@@ -42,6 +49,23 @@ from app.user_profile_api import router as user_profile_router
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Module-level start time for uptime tracking
+start_time = time.time()
+
+# =============================================================================
+# SENTRY
+# =============================================================================
+
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        environment=os.getenv("ENVIRONMENT", "development"),
+        integrations=[FastApiIntegration(), StarletteIntegration()],
+        traces_sample_rate=0.1,
+    )
+    logger.info("Sentry initialized")
 
 # =============================================================================
 # APP SETUP
@@ -81,6 +105,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =============================================================================
+# LOGGING HELPER
+# =============================================================================
+
+def log_error(
+    action: str,
+    error: Exception,
+    user_id: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> None:
+    payload: dict = {
+        "action":     action,
+        "error":      str(error),
+        "error_type": type(error).__name__,
+        "user_id":    user_id,
+        "timestamp":  datetime.now(timezone.utc).isoformat(),
+    }
+    if extra:
+        payload.update(extra)
+    logger.error(json.dumps(payload))
+
+
+# =============================================================================
+# ERROR HANDLERS
+# =============================================================================
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": str(exc), "code": "VALIDATION_ERROR"},
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    log_error("unhandled_exception", exc, extra={"path": str(request.url.path)})
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Something went wrong on our end", "code": "INTERNAL_ERROR"},
+    )
 
 
 # =============================================================================
@@ -561,6 +628,23 @@ async def generate_embeddings_for_all_gifts():
 # =============================================================================
 # HEALTH CHECK
 # =============================================================================
+
+@app.get("/health")
+async def health_check():
+    from app.database import check_db_connection
+    db_ok = await asyncio.to_thread(check_db_connection)
+    uptime = int(time.time() - start_time)
+    status = "ok" if db_ok else "degraded"
+    return {
+        "status":         status,
+        "uptime_seconds": uptime,
+        "checks": {
+            "api":      "ok",
+            "database": "ok" if db_ok else "error",
+        },
+        "environment": os.getenv("ENVIRONMENT", "development"),
+    }
+
 
 @app.get("/")
 def health():
