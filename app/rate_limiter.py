@@ -13,7 +13,7 @@ from app.database import get_supabase, TABLE_TOKEN_USAGE
 logger = logging.getLogger(__name__)
 
 # Configuration constants
-HOURLY_TOKEN_LIMIT = int(os.getenv("HOURLY_TOKEN_LIMIT", "10000"))
+HOURLY_TOKEN_LIMIT = int(os.getenv("HOURLY_TOKEN_LIMIT", "50000"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW", "3600"))
 
 

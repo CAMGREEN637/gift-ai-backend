@@ -43,7 +43,7 @@ async def check_rate_limit_dependency(
                 status_code=429,
                 detail={
                     "error": "Rate limit exceeded",
-                    "message": f"You have used {tokens_used} tokens in the last hour. Limit is {HOURLY_TOKEN_LIMIT} tokens per hour.",
+                    "message": "You've made too many requests. Please wait a few minutes before trying again.",
                     "tokens_used": tokens_used,
                     "limit": HOURLY_TOKEN_LIMIT,
                     "reset_time": reset_time_str,

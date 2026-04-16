@@ -13,7 +13,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=500)
 def _embedding_cache(text: str) -> tuple:
     """Internal cached embedding call — returns tuple so lru_cache can store it."""
     response = client.embeddings.create(
@@ -32,10 +32,14 @@ def generate_embedding(text: str) -> List[float]:
     try:
         # Normalize before caching so minor variations (case, whitespace) share cache entries
         normalized = " ".join(text.lower().split())[:500]
-        cached = _embedding_cache(normalized)
-        hit = _embedding_cache.cache_info().hits > 0
-        logger.debug("Embedding cache info: %s", _embedding_cache.cache_info())
-        return list(cached)
+        info_before = _embedding_cache.cache_info()
+        result = _embedding_cache(normalized)
+        info_after = _embedding_cache.cache_info()
+        if info_after.hits > info_before.hits:
+            logger.info("Embedding cache HIT  (size=%d/%d) query=%.60s", info_after.currsize, 500, normalized)
+        else:
+            logger.info("Embedding cache MISS (size=%d/%d) query=%.60s", info_after.currsize, 500, normalized)
+        return list(result)
     except Exception as e:
         logger.error("Error generating embedding: " + str(e))
         return None
