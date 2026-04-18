@@ -75,12 +75,12 @@ class RecommendRequest(BaseModel):
     # Core quiz answers
     occasion: OccasionEnum
     relationship_stage: Optional[RelationshipStageEnum] = None
-    partner_name: Optional[str] = Field(None, max_length=50)
+    partner_name: Optional[str] = Field(None, max_length=100)
     partner_id: Optional[str] = None
 
     # Smart preselection outputs (user may have overridden)
     vibe: Optional[List[VibeEnum]] = Field(default_factory=list)
-    max_price: Optional[float] = Field(None, gt=0)
+    max_price: Optional[float] = Field(None, ge=0, le=100000)
 
     # Confidence routing
     confidence: Optional[ConfidenceEnum] = None
@@ -93,8 +93,8 @@ class RecommendRequest(BaseModel):
     # These receive a scoring boost in the retrieval layer.
     overlap_interests: Optional[List[str]] = Field(default_factory=list)
 
-    # Date/shipping context
-    occasion_date: Optional[str] = None
+    # Date/shipping context — occasion_date must be an ISO date string (YYYY-MM-DD)
+    occasion_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     days_until_needed: Optional[int] = None
 
     # Legacy field — kept for backward compatibility with saved partner profiles
@@ -105,7 +105,7 @@ class RecommendRequest(BaseModel):
     exclude_names: Optional[List[str]] = Field(default_factory=list)
 
     # Override for k (number of results) — defaults to 5 in main.py
-    k: Optional[int] = None
+    k: Optional[int] = Field(None, ge=1, le=20)
 
     class Config:
         use_enum_values = True

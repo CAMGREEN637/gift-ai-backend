@@ -259,7 +259,11 @@ async def recommend(
     user_id            = body.partner_id   # partner_id doubles as user session id
     partner_id         = body.partner_id
     partner_name       = body.partner_name
-    max_price          = int(body.max_price) if body.max_price else None
+    _raw_max_price = body.max_price
+    if _raw_max_price is not None and _raw_max_price < 0:
+        logger.warning("max_price %s is negative — treating as None", _raw_max_price)
+        _raw_max_price = None
+    max_price          = int(_raw_max_price) if _raw_max_price else None
     days_until_needed  = body.days_until_needed
     occasion           = body.occasion
     relationship_stage = body.relationship_stage
@@ -381,7 +385,11 @@ async def recommend(
     # k — for load-more (exclude_names present), request base_k + exclusion count
     # so after stripping already-shown gifts we still have base_k results.
     # For normal requests, just use base_k.
-    base_k = body.k if body.k and 1 <= body.k <= 20 else 5
+    _raw_k = body.k
+    if _raw_k is not None and not (1 <= _raw_k <= 20):
+        logger.warning("k=%s is out of range [1, 20] — clamping to 5", _raw_k)
+        _raw_k = 5
+    base_k = _raw_k if _raw_k else 5
     exclude_names_lower = [n.lower() for n in (body.exclude_names or [])]
     k = base_k + len(exclude_names_lower)
 

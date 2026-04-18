@@ -5,7 +5,6 @@ from datetime import date
 import logging
 import jwt
 import os
-import time
 from app.database import get_db
 from supabase import Client
 import uuid
@@ -58,32 +57,45 @@ class UserProfile(BaseModel):
 
 # --- Simplified JWT Auth ---
 def get_current_user(authorization: Optional[str] = Header(None)) -> Tuple[str, str]:
-    """Returns a tuple of (user_id, email) from the JWT."""
+    """Returns a tuple of (user_id, email) from the JWT.
+
+    Requires SUPABASE_JWT_SECRET to be set as an environment variable in Railway
+    (Settings → Variables). Without it the server will reject all authenticated
+    requests rather than silently accept forged tokens.
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    # SUPABASE_JWT_SECRET must be set in Railway environment variables.
+    jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+    if not jwt_secret:
+        logger.error("SUPABASE_JWT_SECRET is not set — cannot verify JWT signatures")
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfiguration: JWT secret not set"
+        )
+
     token = authorization.replace("Bearer ", "")
     try:
-        # Decode without verification as per your current setup
-        unverified_payload = jwt.decode(
+        payload = jwt.decode(
             token,
-            options={"verify_signature": False, "verify_exp": True}
+            jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated"
         )
-        user_id = unverified_payload.get("sub")
-        email = unverified_payload.get("email", "")  # Capture email claim
+        user_id = payload.get("sub")
+        email = payload.get("email", "")
 
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token - no user ID")
-
-        exp = unverified_payload.get("exp")
-        if exp and time.time() > exp:
-            raise HTTPException(status_code=401, detail="Token expired")
 
         return user_id, email
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.DecodeError:
         raise HTTPException(status_code=401, detail="Invalid token format")
+    except jwt.InvalidAudienceError:
+        raise HTTPException(status_code=401, detail="Invalid token audience")
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
