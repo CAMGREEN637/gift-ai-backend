@@ -81,6 +81,12 @@ WEIGHT_OVERLAP_BONUS     = 0.12
 WEIGHT_OCCASION_MATCH    = 0.10
 MALE_SKEW_PENALTY        = 0.15
 
+# Gift-type affinity weight — applied as a soft bonus/penalty based on how
+# well a gift's category fits the occasion + relationship stage combination.
+# Sized between occasion (0.10) and vibe (0.20) so it can reorder the top
+# results without overriding strong interest matches.
+WEIGHT_GIFT_TYPE_AFFINITY = 0.15
+
 # --------------------------------------------------
 # NICHE INTEREST HARD FILTER
 # --------------------------------------------------
@@ -99,6 +105,56 @@ OCCASION_VIBE_AFFINITY: Dict[str, List[str]] = {
     "mothers_day": ["pampering", "luxe", "cozy", "sentimental"],
     "just_because":["romantic", "cozy", "fun"],
     "apology":     ["pampering", "sentimental", "thoughtful"],
+}
+
+# --------------------------------------------------
+# OCCASION → GIFT TYPE AFFINITY
+# --------------------------------------------------
+# Mirrors the GIFT_TYPE_GUIDANCE table in the frontend's quizRules.ts, but now
+# applied as a soft scoring signal rather than a user-facing selection.
+# Keeps a genuinely great mismatched gift (e.g. headphones she's wanted for
+# months) reachable via interest overlap — just discounted for the occasion.
+
+GIFT_TYPE_OCCASION_AFFINITY: Dict[str, Dict[str, List[str]]] = {
+    "valentines": {
+        "recommended": ["jewelry", "beauty", "loungewear", "home"],
+        "discouraged": ["tech", "fitness", "outdoors"],
+    },
+    "anniversary": {
+        "recommended": ["jewelry", "home", "beauty", "loungewear"],
+        "discouraged": ["tech", "fitness", "outdoors"],
+    },
+    "birthday": {
+        "recommended": ["jewelry", "beauty", "hobby", "loungewear", "book"],
+        "discouraged": [],
+    },
+    "christmas": {
+        "recommended": ["home", "beauty", "loungewear", "book", "hobby"],
+        "discouraged": [],
+    },
+    "mothers_day": {
+        "recommended": ["beauty", "loungewear", "home", "jewelry"],
+        "discouraged": ["tech", "fitness", "outdoors"],
+    },
+    "just_because": {
+        "recommended": ["beauty", "loungewear", "home", "book"],
+        "discouraged": ["tech", "fitness", "outdoors"],
+    },
+    "apology": {
+        "recommended": ["beauty", "loungewear", "jewelry", "home"],
+        "discouraged": ["tech", "fitness", "outdoors", "kitchen"],
+    },
+}
+
+# Relationship stage amplifies the affinity signal — higher commitment means
+# sharper penalties for mismatched gifts, because she has more context on you
+# and a generic miss reads worse. Complicated stages get a softer touch.
+STAGE_AFFINITY_MULTIPLIER: Dict[str, float] = {
+    "new":         0.5,   # early on, misses are forgiven
+    "dating":      1.0,   # baseline
+    "serious":     1.3,   # she has expectations
+    "committed":   1.5,   # highest stakes, sharpest signal
+    "complicated": 0.7,   # keep it warm, don't over-penalize
 }
 
 # Soft price ceiling for apology occasion
@@ -310,6 +366,53 @@ def build_search_query(request: RecommendRequest) -> str:
 
 
 # --------------------------------------------------
+# GIFT-TYPE AFFINITY
+# --------------------------------------------------
+
+def _gift_type_affinity_score(
+    gift_categories: List[str],
+    occasion: Optional[str],
+    stage: Optional[str],
+) -> Tuple[float, str]:
+    """
+    Returns (score, classification) where:
+      - score is in roughly [-1.5, 1.5] after stage multiplier
+      - classification is "recommended" | "discouraged" | "neutral"
+
+    Positive score = gift type tends to land well for this occasion.
+    Negative score = gift type tends to miss the mark.
+    Zero           = neutral / no guidance for this occasion.
+
+    The classification string is exposed so the scoring caller can surface
+    per-gift reasoning on the results page (e.g. "A safe bet for Valentine's
+    Day" or "Unusual choice for this occasion").
+    """
+    if not occasion or not gift_categories:
+        return 0.0, "neutral"
+
+    affinity = GIFT_TYPE_OCCASION_AFFINITY.get(occasion, {})
+    recommended = set(affinity.get("recommended", []))
+    discouraged = set(affinity.get("discouraged", []))
+
+    if not recommended and not discouraged:
+        return 0.0, "neutral"
+
+    gift_cats = {str(c).lower() for c in gift_categories}
+
+    if gift_cats & recommended:
+        base_score = 1.0
+        classification = "recommended"
+    elif gift_cats & discouraged:
+        base_score = -1.0
+        classification = "discouraged"
+    else:
+        return 0.0, "neutral"
+
+    multiplier = STAGE_AFFINITY_MULTIPLIER.get(stage or "dating", 1.0)
+    return base_score * multiplier, classification
+
+
+# --------------------------------------------------
 # ORIGINAL SCORING
 # --------------------------------------------------
 
@@ -423,12 +526,19 @@ def compute_quiz_signal_score(
     gift: Dict,
     request: RecommendRequest,
     conf_multipliers: Dict,
-) -> float:
+) -> Tuple[float, str]:
+    """
+    Returns (score, gift_type_classification) where classification is
+    "recommended" | "discouraged" | "neutral" based on the occasion + stage
+    fit of the gift's category. Callers can use the classification to surface
+    per-gift reasoning on the results page.
+    """
     score = 0.0
 
     g_vibes     = gift.get("vibe") or []
     g_interests = gift.get("interests") or []
     g_occasions = gift.get("occasions") or []
+    g_categories = gift.get("gift_type") or gift.get("categories") or []
     gender_skew = gift.get("gender_skew") or "unisex"
     gift_price  = float(gift.get("price") or 0)
 
@@ -466,12 +576,25 @@ def compute_quiz_signal_score(
         if request.occasion in g_occasions:
             score += WEIGHT_OCCASION_MATCH
 
+    # Gift-type affinity by occasion + stage.
+    # Soft signal — enough to break ties and reorder the top 10, not enough
+    # to override a strong interest match. Calibrated so max impact (committed
+    # stage, full multiplier) is roughly equivalent to one interest overlap.
+    gift_type_classification = "neutral"
+    if request.occasion:
+        affinity_score, gift_type_classification = _gift_type_affinity_score(
+            gift_categories=g_categories,
+            occasion=request.occasion,
+            stage=request.relationship_stage,
+        )
+        score += WEIGHT_GIFT_TYPE_AFFINITY * affinity_score
+
     if request.relationship_stage:
         score += _relationship_stage_bonus(
             request.relationship_stage, g_vibes, gift_price, request
         )
 
-    return score
+    return score, gift_type_classification
 
 
 def _relationship_stage_bonus(
@@ -711,10 +834,12 @@ def retrieve_gifts(
         )
 
         quiz_signal_score = 0.0
+        gift_type_classification = "neutral"
         if request is not None:
-            quiz_signal_score = compute_quiz_signal_score(
+            raw_quiz_score, gift_type_classification = compute_quiz_signal_score(
                 g, request, conf_multipliers
-            ) * 30
+            )
+            quiz_signal_score = raw_quiz_score * 30
 
         final_score = original_score + quiz_signal_score
 
@@ -727,17 +852,22 @@ def retrieve_gifts(
             reasons.append("Matches your interests")
         if delivery_status == "on_time":
             reasons.append("Fast shipping")
+        if gift_type_classification == "recommended":
+            reasons.append("A safe bet for this occasion")
+        elif gift_type_classification == "discouraged":
+            reasons.append("Unusual pick — but her interests made it work")
         if is_fallback:
             reasons.append("Great for the occasion")
 
         g.update({
-            "score":            final_score,
-            "confidence":       round(confidence_val, 2),
-            "ranking_reasons":  reasons if reasons else ["Highly rated match"],
-            "delivery_status":  delivery_status,
-            "already_purchased":score_data.get("already_purchased", False),
-            "missed_intent":    score_data.get("missed_intent", False),
-            "fallback":         is_fallback,
+            "score":                    final_score,
+            "confidence":               round(confidence_val, 2),
+            "ranking_reasons":          reasons if reasons else ["Highly rated match"],
+            "delivery_status":          delivery_status,
+            "already_purchased":        score_data.get("already_purchased", False),
+            "missed_intent":            score_data.get("missed_intent", False),
+            "fallback":                 is_fallback,
+            "gift_type_classification": gift_type_classification,
         })
         return g
 
