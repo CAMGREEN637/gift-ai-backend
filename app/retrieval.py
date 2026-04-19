@@ -15,7 +15,6 @@ from app.schemas import RecommendRequest
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — avoids recreating the client on every request
 _supabase_client = None
 
 # --------------------------------------------------
@@ -29,27 +28,20 @@ GENERIC_TOKENS = {
     "for", "her", "him", "them", "woman", "man", "person",
     "who", "loves", "likes", "enjoys", "into",
     "named", "called",
-
-    # Expanded: vibe-adjacent words that appear in query strings but carry
-    # no discriminative signal (they match too many unrelated gift descriptions)
     "cozy", "warm", "comfortable", "home",
     "luxury", "premium", "high", "end",
     "indulgent", "range", "mid"
 }
 
-# Threshold set to 0.0 — the hard interest filter (Pass 1) and
-# MIN_VECTOR_SCORE_FOR_FULL_SCORING gate handle quality. This just
-# ensures match_gifts always returns a full 80-candidate pool so
-# Pass 2 has enough inventory to find vibe/occasion fallbacks.
 VECTOR_MATCH_THRESHOLD = 0.0
 
 # --------------------------------------------------
-# SCORING WEIGHTS — ORIGINAL (with updates)
+# SCORING WEIGHTS — ORIGINAL
 # --------------------------------------------------
 
-VECTOR_WEIGHT            = 35   # ↓ reduced from 60 — vector score was dominating over interest signals
+VECTOR_WEIGHT            = 35
 INTENT_WEIGHT            = 40
-SESSION_WEIGHT           = 80   # ↑ increased from 35 — direct interest overlap is the strongest signal
+SESSION_WEIGHT           = 80
 PROFILE_WEIGHT           = 3
 DIVERSITY_PENALTY        = 20
 NOVELTY_BOOST            = 10
@@ -61,17 +53,11 @@ SHIPPING_LATE_PENALTY    = -20
 PRICE_FLOOR_RATIO        = 0.08
 PRICE_FLOOR_MAX_BUDGET   = 2000
 
-# Minimum vector similarity for full scoring.
-# Gifts below this threshold still enter the loop (they passed VECTOR_MATCH_THRESHOLD)
-# but have price affinity suppressed and intent score capped to 1 match worth of points.
-MIN_VECTOR_SCORE_FOR_FULL_SCORING = 0.35
-
-# Additional penalty applied when confidence == "confident" and
-# the gift's interests have zero overlap with the user's requested interests.
+MIN_VECTOR_SCORE_FOR_FULL_SCORING    = 0.35
 CONFIDENT_INTEREST_MISMATCH_PENALTY = -80
 
 # --------------------------------------------------
-# SCORING WEIGHTS — NEW QUIZ SIGNALS
+# SCORING WEIGHTS — QUIZ SIGNALS
 # --------------------------------------------------
 
 WEIGHT_VECTOR_SIMILARITY = 0.25
@@ -81,11 +67,9 @@ WEIGHT_OVERLAP_BONUS     = 0.12
 WEIGHT_OCCASION_MATCH    = 0.10
 MALE_SKEW_PENALTY        = 0.15
 
-# Gift-type affinity weight — applied as a soft bonus/penalty based on how
-# well a gift's category fits the occasion + relationship stage combination.
-# Sized between occasion (0.10) and vibe (0.20) so it can reorder the top
-# results without overriding strong interest matches.
-WEIGHT_GIFT_TYPE_AFFINITY = 0.15
+# Raised to 0.35 so discouraged gifts take a ~15pt hit (0.35 * -1.5 * 30)
+# — enough to reorder results meaningfully without overriding strong interest matches.
+WEIGHT_GIFT_TYPE_AFFINITY = 0.35
 
 # --------------------------------------------------
 # NICHE INTEREST HARD FILTER
@@ -98,66 +82,75 @@ NICHE_INTEREST_TAGS: Set[str] = {"pets"}
 # --------------------------------------------------
 
 OCCASION_VIBE_AFFINITY: Dict[str, List[str]] = {
-    "birthday":    ["luxe", "fun", "thoughtful"],
-    "valentines":  ["romantic", "sentimental", "pampering"],
-    "anniversary": ["sentimental", "romantic", "luxe"],
-    "christmas":   ["cozy", "fun", "luxe"],
-    "mothers_day": ["pampering", "luxe", "cozy", "sentimental"],
-    "just_because":["romantic", "cozy", "fun"],
-    "apology":     ["pampering", "sentimental", "thoughtful"],
+    "birthday":     ["luxe", "fun", "thoughtful"],
+    "valentines":   ["romantic", "sentimental", "pampering"],
+    "anniversary":  ["sentimental", "romantic", "luxe"],
+    "christmas":    ["cozy", "fun", "luxe"],
+    "mothers_day":  ["pampering", "luxe", "cozy", "sentimental"],
+    "just_because": ["romantic", "cozy", "fun"],
+    "apology":      ["pampering", "sentimental", "thoughtful"],
 }
 
 # --------------------------------------------------
 # OCCASION → GIFT TYPE AFFINITY
 # --------------------------------------------------
-# Mirrors the GIFT_TYPE_GUIDANCE table in the frontend's quizRules.ts, but now
-# applied as a soft scoring signal rather than a user-facing selection.
-# Keeps a genuinely great mismatched gift (e.g. headphones she's wanted for
-# months) reachable via interest overlap — just discounted for the occasion.
+# All tags verified against actual DB values from:
+#   SELECT DISTINCT gift_type FROM gifts;
+#
+# Confirmed DB tags: tech, home, outdoors, fitness, hobby, beauty, kitchen, book, fashion
+#
+# Original table used "jewelry" (→ beauty) and "loungewear" (→ home) which
+# don't exist in the DB. Remapped to nearest real equivalents.
 
 GIFT_TYPE_OCCASION_AFFINITY: Dict[str, Dict[str, List[str]]] = {
     "valentines": {
-        "recommended": ["jewelry", "beauty", "loungewear", "home"],
-        "discouraged": ["tech", "fitness", "outdoors"],
+        # Personal, warm, pampering. Beauty and home cover the bulk of what
+        # lands well. Fashion works for style-conscious partners.
+        "recommended": ["beauty", "home", "fashion"],
+        # Tech rarely feels romantic. Fitness risks reading as a comment on
+        # her body. Outdoors lacks intimacy. Kitchen feels utilitarian.
+        "discouraged": ["tech", "fitness", "outdoors", "kitchen"],
     },
     "anniversary": {
-        "recommended": ["jewelry", "home", "beauty", "loungewear"],
-        "discouraged": ["tech", "fitness", "outdoors"],
+        "recommended": ["beauty", "home", "fashion"],
+        "discouraged": ["tech", "fitness", "outdoors", "kitchen"],
     },
     "birthday": {
-        "recommended": ["jewelry", "beauty", "hobby", "loungewear", "book"],
+        # Most permissive occasion — almost any type lands if interest-matched.
+        "recommended": ["beauty", "hobby", "book", "home", "fashion"],
         "discouraged": [],
     },
     "christmas": {
-        "recommended": ["home", "beauty", "loungewear", "book", "hobby"],
+        # Cozy, indulgent, unwrappable. Home and beauty are the sweet spot.
+        "recommended": ["home", "beauty", "hobby", "book"],
         "discouraged": [],
     },
     "mothers_day": {
-        "recommended": ["beauty", "loungewear", "home", "jewelry"],
+        "recommended": ["beauty", "home", "fashion"],
         "discouraged": ["tech", "fitness", "outdoors"],
     },
     "just_because": {
-        "recommended": ["beauty", "loungewear", "home", "book"],
-        "discouraged": ["tech", "fitness", "outdoors"],
+        # Spontaneous gifts should feel warm and personal, not utilitarian.
+        "recommended": ["beauty", "home", "book"],
+        "discouraged": ["tech", "fitness", "outdoors", "kitchen"],
     },
     "apology": {
-        "recommended": ["beauty", "loungewear", "jewelry", "home"],
+        # Needs to feel warm and personal. Kitchen implies domestic expectations.
+        # Tech signals you grabbed something easy.
+        "recommended": ["beauty", "home", "fashion"],
         "discouraged": ["tech", "fitness", "outdoors", "kitchen"],
     },
 }
 
-# Relationship stage amplifies the affinity signal — higher commitment means
-# sharper penalties for mismatched gifts, because she has more context on you
-# and a generic miss reads worse. Complicated stages get a softer touch.
+# Stage amplifies the affinity signal — higher commitment = sharper penalties.
 STAGE_AFFINITY_MULTIPLIER: Dict[str, float] = {
-    "new":         0.5,   # early on, misses are forgiven
-    "dating":      1.0,   # baseline
-    "serious":     1.3,   # she has expectations
-    "committed":   1.5,   # highest stakes, sharpest signal
-    "complicated": 0.7,   # keep it warm, don't over-penalize
+    "new":         0.5,
+    "dating":      1.0,
+    "serious":     1.3,
+    "committed":   1.5,
+    "complicated": 0.7,
 }
 
-# Soft price ceiling for apology occasion
 APOLOGY_PRICE_CEILING = 150.0
 
 # --------------------------------------------------
@@ -228,10 +221,9 @@ RESULTS_HEADLINES: Dict[str, Dict[str, str]] = {
 
 
 def get_results_headline(occasion: str, stage: Optional[str]) -> Tuple[str, str]:
-    """Returns (headline, subline) for the results page."""
     headlines = RESULTS_HEADLINES.get(occasion, {})
-    headline = headlines.get(stage or "dating", "Here are some great options for her.")
-    sublines = {
+    headline  = headlines.get(stage or "dating", "Here are some great options for her.")
+    sublines  = {
         "confident": "Matched to her specific interests.",
         "somewhat":  "A mix of specific and crowd-pleasing picks.",
         "lost":      "Top-rated gifts for the occasion — no guesswork needed.",
@@ -265,16 +257,15 @@ def tokenize(text: str) -> Set[str]:
 
 
 def extract_meaningful_intent_tokens(query: str) -> Set[str]:
-    all_tokens = tokenize(query)
-    words = query.split()
+    all_tokens       = tokenize(query)
+    words            = query.split()
     capitalized_words = {word.lower() for word in words if word and word[0].isupper()}
-    meaningful = all_tokens - GENERIC_TOKENS - capitalized_words
+    meaningful       = all_tokens - GENERIC_TOKENS - capitalized_words
     logger.info(f"Query: '{query}' -> Meaningful tokens: {meaningful}")
     return meaningful
 
 
 def normalize_jsonb_to_list(value: Any) -> List[str]:
-    """Convert JSONB field to Python list of strings safely."""
     if value is None:
         return []
     if isinstance(value, list):
@@ -295,39 +286,30 @@ def normalize_preferences(preferences: Optional[Dict]) -> Dict:
     interests = preferences.get("interests", [])
     if isinstance(interests, str):
         interests = [i.strip() for i in interests.split(",")]
-    return {
-        "interests": [str(i).lower() for i in interests if i]
-    }
+    return {"interests": [str(i).lower() for i in interests if i]}
 
 
 def compute_price_affinity_bonus(
     price: float,
     min_price: Optional[float],
-    max_price: Optional[float]
+    max_price: Optional[float],
 ) -> float:
     if max_price is None or price is None or price == 0.0:
         return 0.0
-
     effective_min = min_price if min_price is not None else 0.0
-    price_range = max_price - effective_min
-
+    price_range   = max_price - effective_min
     if price_range <= 0:
         return 0.0
-
-    position = (price - effective_min) / price_range
-    position = max(0.0, min(1.0, position))
-
+    position = max(0.0, min(1.0, (price - effective_min) / price_range))
     if position >= 0.75:
         return float(PRICE_AFFINITY_MAX_BONUS)
     elif position >= 0.50:
         return float(PRICE_AFFINITY_MAX_BONUS * 0.5)
-    else:
-        return 0.0
+    return 0.0
 
 
 def build_search_query(request: RecommendRequest) -> str:
     parts = []
-
     occasion_phrases = {
         "birthday":     "birthday gift",
         "valentines":   "Valentine's Day gift",
@@ -337,7 +319,6 @@ def build_search_query(request: RecommendRequest) -> str:
         "just_because": "surprise gift",
         "apology":      "apology gift sincere",
     }
-
     if request.confidence == "confident" and request.interests:
         parts.append(" ".join(request.interests[:5]))
         if request.overlap_interests:
@@ -345,23 +326,17 @@ def build_search_query(request: RecommendRequest) -> str:
         parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
     else:
         parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
-
         stage_phrases = {
-            "new":         "new relationship",
-            "dating":      "girlfriend",
-            "serious":     "girlfriend",
-            "committed":   "wife",
+            "new": "new relationship", "dating": "girlfriend",
+            "serious": "girlfriend",  "committed": "wife",
             "complicated": "girlfriend",
         }
         if request.relationship_stage:
             parts.append(stage_phrases.get(request.relationship_stage, ""))
-
         if request.confidence != "lost" and request.interests:
             parts.append(" ".join(request.interests[:5]))
-
         if request.overlap_interests:
             parts.append(" ".join(request.overlap_interests))
-
     return " ".join(filter(None, parts))
 
 
@@ -375,24 +350,16 @@ def _gift_type_affinity_score(
     stage: Optional[str],
 ) -> Tuple[float, str]:
     """
-    Returns (score, classification) where:
-      - score is in roughly [-1.5, 1.5] after stage multiplier
-      - classification is "recommended" | "discouraged" | "neutral"
-
-    Positive score = gift type tends to land well for this occasion.
-    Negative score = gift type tends to miss the mark.
-    Zero           = neutral / no guidance for this occasion.
-
-    The classification string is exposed so the scoring caller can surface
-    per-gift reasoning on the results page (e.g. "A safe bet for Valentine's
-    Day" or "Unusual choice for this occasion").
+    Returns (score, classification).
+    score          ∈ [-1.5, 1.5] after stage multiplier
+    classification ∈ "recommended" | "discouraged" | "neutral"
     """
     if not occasion or not gift_categories:
         return 0.0, "neutral"
 
-    affinity = GIFT_TYPE_OCCASION_AFFINITY.get(occasion, {})
+    affinity    = GIFT_TYPE_OCCASION_AFFINITY.get(occasion, {})
     recommended = set(affinity.get("recommended", []))
-    discouraged = set(affinity.get("discouraged", []))
+    discouraged  = set(affinity.get("discouraged",  []))
 
     if not recommended and not discouraged:
         return 0.0, "neutral"
@@ -400,10 +367,10 @@ def _gift_type_affinity_score(
     gift_cats = {str(c).lower() for c in gift_categories}
 
     if gift_cats & recommended:
-        base_score = 1.0
+        base_score     = 1.0
         classification = "recommended"
     elif gift_cats & discouraged:
-        base_score = -1.0
+        base_score     = -1.0
         classification = "discouraged"
     else:
         return 0.0, "neutral"
@@ -438,21 +405,17 @@ def compute_enhanced_score(
         " ".join(g_categories)
     ).lower()
 
-    matched_intent = [t for t in meaningful_intent_tokens if t in gift_text]
-
+    matched_intent         = [t for t in meaningful_intent_tokens if t in gift_text]
     effective_intent_count = min(len(matched_intent), 1) if weak_vector_match else len(matched_intent)
-    intent_score = effective_intent_count * INTENT_WEIGHT
+    intent_score           = effective_intent_count * INTENT_WEIGHT
 
-    user_interests = [i.lower().strip() for i in preferences.get("interests", []) if i]
-
+    user_interests   = [i.lower().strip() for i in preferences.get("interests", []) if i]
     interest_overlap = set(g_interests) & set(user_interests)
-    session_score = len(interest_overlap) * SESSION_WEIGHT
+    session_score    = len(interest_overlap) * SESSION_WEIGHT
+    exact_boost      = 50 if interest_overlap else 0
 
-    exact_boost = 50 if interest_overlap else 0
-
-    gift_tag_blob = " ".join(g_interests + g_categories).lower()
+    gift_tag_blob   = " ".join(g_interests + g_categories).lower()
     gift_tag_tokens = set(gift_tag_blob.split())
-
     broad_interest_matches = set()
     for interest in user_interests:
         for token in interest.split():
@@ -470,20 +433,13 @@ def compute_enhanced_score(
         )
 
     history_penalty = -50 if str(gift.get("id")) in [str(id) for id in partner_gift_history] else 0
-
-    feedback_score = 0
-    if feedback_lookup:
-        feedback_score = feedback_lookup.get(gift.get("name", ""), 0)
+    feedback_score  = feedback_lookup.get(gift.get("name", ""), 0) if feedback_lookup else 0
 
     intent_penalty = 0
     if (len(meaningful_intent_tokens) > 0
             and len(matched_intent) == 0
             and len(broad_interest_matches) == 0):
         intent_penalty = -60
-        logger.debug(
-            f"Penalized {gift.get('name')} for ignoring intent tokens: "
-            f"{meaningful_intent_tokens}"
-        )
 
     total_boost = (
         intent_score + session_score + exact_boost + profile_score
@@ -527,59 +483,47 @@ def compute_quiz_signal_score(
     request: RecommendRequest,
     conf_multipliers: Dict,
 ) -> Tuple[float, str]:
-    """
-    Returns (score, gift_type_classification) where classification is
-    "recommended" | "discouraged" | "neutral" based on the occasion + stage
-    fit of the gift's category. Callers can use the classification to surface
-    per-gift reasoning on the results page.
-    """
+    """Returns (score, gift_type_classification)."""
     score = 0.0
 
-    g_vibes     = gift.get("vibe") or []
-    g_interests = gift.get("interests") or []
-    g_occasions = gift.get("occasions") or []
+    g_vibes      = gift.get("vibe") or []
+    g_interests  = gift.get("interests") or []
+    g_occasions  = gift.get("occasions") or []
     g_categories = gift.get("gift_type") or gift.get("categories") or []
-    gender_skew = gift.get("gender_skew") or "unisex"
-    gift_price  = float(gift.get("price") or 0)
+    gender_skew  = gift.get("gender_skew") or "unisex"
+    gift_price   = float(gift.get("price") or 0)
 
     if gender_skew == "male":
         score -= MALE_SKEW_PENALTY
 
     vec_sim = float(gift.get("similarity") or 0)
-    score += WEIGHT_VECTOR_SIMILARITY * vec_sim
+    score  += WEIGHT_VECTOR_SIMILARITY * vec_sim
 
     requested_vibes = list(request.vibe or [])
     occasion_vibes  = OCCASION_VIBE_AFFINITY.get(request.occasion or "", [])
     all_vibes       = list(set(requested_vibes + occasion_vibes))
-
     if g_vibes and all_vibes:
         matched_vibe = sum(1 for v in g_vibes if v in all_vibes)
         vibe_score   = matched_vibe / max(len(g_vibes), 1)
-        score += WEIGHT_VIBE_MATCH * vibe_score * conf_multipliers["vibe"]
+        score       += WEIGHT_VIBE_MATCH * vibe_score * conf_multipliers["vibe"]
 
     if conf_multipliers["interest"] > 0:
         requested_interests = list(request.interests or [])
         overlap_interests   = list(request.overlap_interests or [])
-
         if g_interests and requested_interests:
             matched_interest = sum(1 for i in g_interests if i in requested_interests)
             interest_score   = matched_interest / max(len(g_interests), 1)
-            score += WEIGHT_INTEREST_MATCH * interest_score * conf_multipliers["interest"]
-
+            score           += WEIGHT_INTEREST_MATCH * interest_score * conf_multipliers["interest"]
         if g_interests and overlap_interests:
             overlap_matched = sum(1 for i in g_interests if i in overlap_interests)
             if overlap_matched > 0:
                 overlap_score = overlap_matched / max(len(g_interests), 1)
-                score += WEIGHT_OVERLAP_BONUS * overlap_score * conf_multipliers["overlap"]
+                score        += WEIGHT_OVERLAP_BONUS * overlap_score * conf_multipliers["overlap"]
 
     if request.occasion and g_occasions:
         if request.occasion in g_occasions:
             score += WEIGHT_OCCASION_MATCH
 
-    # Gift-type affinity by occasion + stage.
-    # Soft signal — enough to break ties and reorder the top 10, not enough
-    # to override a strong interest match. Calibrated so max impact (committed
-    # stage, full multiplier) is roughly equivalent to one interest overlap.
     gift_type_classification = "neutral"
     if request.occasion:
         affinity_score, gift_type_classification = _gift_type_affinity_score(
@@ -604,7 +548,6 @@ def _relationship_stage_bonus(
     request: RecommendRequest,
 ) -> float:
     bonus = 0.0
-
     if stage == "new":
         if any(v in gift_vibes for v in ["fun", "cozy", "thoughtful"]):
             bonus += 0.05
@@ -612,22 +555,17 @@ def _relationship_stage_bonus(
             bonus -= 0.05
         if gift_price > 75:
             bonus -= 0.10
-
     elif stage == "dating":
         if any(v in gift_vibes for v in ["thoughtful", "fun", "romantic"]):
             bonus += 0.05
-
     elif stage == "serious":
         if any(v in gift_vibes for v in ["luxe", "sentimental", "pampering"]):
             bonus += 0.05
-
     elif stage == "committed":
         if any(v in gift_vibes for v in ["sentimental", "pampering", "luxe"]):
             bonus += 0.08
-        occasion = getattr(request, "occasion", None)
-        if occasion in ["valentines", "anniversary"] and gift_price < 50:
+        if getattr(request, "occasion", None) in ["valentines", "anniversary"] and gift_price < 50:
             bonus -= 0.08
-
     elif stage == "complicated":
         if any(v in gift_vibes for v in ["cozy", "fun", "thoughtful"]):
             bonus += 0.05
@@ -635,7 +573,6 @@ def _relationship_stage_bonus(
             bonus -= 0.03
         if gift_price > 100:
             bonus -= 0.08
-
     return bonus
 
 
@@ -656,25 +593,18 @@ def retrieve_gifts(
     k: int = 5,
 ) -> List[Dict]:
     """
-    Main retrieval function.
-
     Two-pass scoring system:
-      Pass 1 — interest-matched gifts only (hard filter in confident mode)
+      Pass 1 — interest-matched gifts (hard filter in confident mode)
       Pass 2 — vibe/occasion fallbacks when Pass 1 yields fewer than k results
-
-    k controls the number of results returned. Defaults to 5.
-    Passed as a keyword argument from main.py to support load-more.
     """
-    preferences = normalize_preferences(preferences)
+    preferences          = normalize_preferences(preferences)
     meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
     partner_gift_history = partner_gift_history or []
 
     confidence_level = "somewhat"
     if request is not None:
         confidence_level = getattr(request, "confidence", None) or "somewhat"
-    conf_multipliers = CONFIDENCE_MULTIPLIERS.get(
-        confidence_level, CONFIDENCE_MULTIPLIERS["somewhat"]
-    )
+    conf_multipliers = CONFIDENCE_MULTIPLIERS.get(confidence_level, CONFIDENCE_MULTIPLIERS["somewhat"])
 
     effective_max = max_price
     if request is not None and getattr(request, "occasion", None) == "apology":
@@ -686,7 +616,6 @@ def retrieve_gifts(
     if request is not None and confidence_level == "confident":
         request_interests = list(request.interests or [])
 
-    # Fetch feedback history once — avoids N+1 Supabase queries inside _score_gift
     feedback_lookup: Dict[str, int] = {}
     if user_id:
         try:
@@ -701,14 +630,10 @@ def retrieve_gifts(
             logger.warning(f"Could not fetch feedback history: {e}")
 
     try:
-        supabase = get_supabase_client()
-
-        t_embed = time.time()
+        supabase  = get_supabase_client()
+        t_embed   = time.time()
         embedding = generate_embedding(query)
-        logger.info(
-            f"[PERF] Embedding: {(time.time() - t_embed)*1000:.0f}ms "
-            f"(cache_info={generate_embedding.__wrapped__.__name__ if hasattr(generate_embedding, '__wrapped__') else 'n/a'})"
-        )
+        logger.info(f"[PERF] Embedding: {(time.time() - t_embed)*1000:.0f}ms")
         if not embedding or len(embedding) == 0:
             logger.error("Embedding generation returned empty result.")
             return []
@@ -716,14 +641,9 @@ def retrieve_gifts(
         t_search = time.time()
         response = supabase.rpc(
             "match_gifts",
-            {
-                "query_embedding": embedding,
-                "match_threshold": VECTOR_MATCH_THRESHOLD,
-                "match_count": 80,
-            }
+            {"query_embedding": embedding, "match_threshold": VECTOR_MATCH_THRESHOLD, "match_count": 80},
         ).execute()
         logger.info(f"[PERF] Vector search: {(time.time() - t_search)*1000:.0f}ms")
-
         raw_gifts = response.data or []
         logger.info(f"Retrieved {len(raw_gifts)} candidates from vector search")
 
@@ -733,7 +653,7 @@ def retrieve_gifts(
         return []
 
     # --------------------------------------------------
-    # NORMALISE RAW GIFTS ONCE
+    # NORMALISE RAW GIFTS
     # --------------------------------------------------
     normalised = []
     for g in raw_gifts:
@@ -754,7 +674,6 @@ def retrieve_gifts(
 
         if effective_max is not None and current_price > effective_max:
             continue
-
         if (effective_max is not None
                 and effective_max <= PRICE_FLOOR_MAX_BUDGET
                 and current_price > 0
@@ -762,24 +681,19 @@ def retrieve_gifts(
             continue
 
         gift_interests_set = set(g.get("interests") or [])
-        unselected_niche = (NICHE_INTEREST_TAGS & gift_interests_set) - (NICHE_INTEREST_TAGS & user_interests_set)
+        unselected_niche   = (NICHE_INTEREST_TAGS & gift_interests_set) - (NICHE_INTEREST_TAGS & user_interests_set)
         if unselected_niche:
-            logger.debug(
-                f"Niche filter removed '{g.get('name')}' — "
-                f"tagged {unselected_niche} but user did not select those interests"
-            )
             continue
 
         normalised.append((g, current_price))
 
     # --------------------------------------------------
-    # SHARED SCORING HELPER
+    # SCORING HELPER
     # --------------------------------------------------
     def _score_gift(g: Dict, current_price: float, is_fallback: bool = False) -> Dict:
-        vec_sim = float(g.get("similarity") or 0)
+        vec_sim           = float(g.get("similarity") or 0)
         weak_vector_match = vec_sim < MIN_VECTOR_SCORE_FOR_FULL_SCORING
-
-        vector_score = vec_sim * VECTOR_WEIGHT
+        vector_score      = vec_sim * VECTOR_WEIGHT
 
         score_data = compute_enhanced_score(
             g, meaningful_intent_tokens, preferences,
@@ -789,60 +703,42 @@ def retrieve_gifts(
             feedback_lookup=feedback_lookup,
         )
 
-        novelty_score = (
-            NOVELTY_BOOST
-            if str(g.get("id")) not in [str(gid) for gid in partner_gift_history]
-            else 0
-        )
+        novelty_score = NOVELTY_BOOST if str(g.get("id")) not in [str(gid) for gid in partner_gift_history] else 0
 
         try:
-            price_affinity = compute_price_affinity_bonus(
-                price=current_price,
-                min_price=min_price,
-                max_price=effective_max,
-            )
+            price_affinity = compute_price_affinity_bonus(current_price, min_price, effective_max)
         except (ValueError, TypeError):
             price_affinity = 0.0
 
-        on_time_bonus = 0
+        on_time_bonus   = 0
         delivery_status = "unknown"
         if days_until_needed is not None:
             shipping_max = int(g.get("shipping_max_days") or 7)
             if shipping_max <= days_until_needed:
-                on_time_bonus   = SHIPPING_ON_TIME_BONUS
-                delivery_status = "on_time"
+                on_time_bonus, delivery_status   = SHIPPING_ON_TIME_BONUS, "on_time"
             elif shipping_max <= days_until_needed + 2:
-                on_time_bonus   = SHIPPING_TIGHT_BONUS
-                delivery_status = "tight"
+                on_time_bonus, delivery_status   = SHIPPING_TIGHT_BONUS,   "tight"
             else:
-                on_time_bonus   = SHIPPING_LATE_PENALTY
-                delivery_status = "late"
+                on_time_bonus, delivery_status   = SHIPPING_LATE_PENALTY,  "late"
 
-        has_relevance = (
+        has_relevance      = (
             score_data["intent_match_count"] >= 2
-            or (score_data["intent_match_count"] >= 1
-                and len(score_data["broad_interest_matches"]) > 0)
+            or (score_data["intent_match_count"] >= 1 and len(score_data["broad_interest_matches"]) > 0)
         )
         gated_price_affinity = price_affinity if (has_relevance and not weak_vector_match) else 0.0
 
         original_score = (
-            vector_score
-            + score_data["total_boost"]
-            + novelty_score
-            + on_time_bonus
-            + gated_price_affinity
+            vector_score + score_data["total_boost"] + novelty_score
+            + on_time_bonus + gated_price_affinity
         )
 
-        quiz_signal_score = 0.0
+        quiz_signal_score        = 0.0
         gift_type_classification = "neutral"
         if request is not None:
-            raw_quiz_score, gift_type_classification = compute_quiz_signal_score(
-                g, request, conf_multipliers
-            )
+            raw_quiz_score, gift_type_classification = compute_quiz_signal_score(g, request, conf_multipliers)
             quiz_signal_score = raw_quiz_score * 30
 
-        final_score = original_score + quiz_signal_score
-
+        final_score    = original_score + quiz_signal_score
         confidence_val = compute_confidence(vec_sim, score_data["intent_match_count"])
 
         reasons = []
@@ -872,20 +768,14 @@ def retrieve_gifts(
         return g
 
     # --------------------------------------------------
-    # PASS 1 — interest hard filter active in confident mode
+    # PASS 1 — interest hard filter in confident mode
     # --------------------------------------------------
     scored = []
     for g, current_price in normalised:
         gift_interests_set = set(g.get("interests") or [])
-
         if confidence_level == "confident" and request_interests:
             if not gift_interests_set & set(request_interests):
-                logger.debug(
-                    f"Pass 1 hard filter removed '{g.get('name')}' — "
-                    f"no overlap with requested interests {request_interests}"
-                )
                 continue
-
         scored.append(_score_gift(g, current_price, is_fallback=False))
 
     logger.info(f"Pass 1 yielded {len(scored)} interest-matched gifts")
@@ -894,23 +784,18 @@ def retrieve_gifts(
     # PASS 2 — fallback (only when Pass 1 < k)
     # --------------------------------------------------
     if len(scored) < k and confidence_level == "confident" and request_interests:
-        needed = k - len(scored)
-        pass1_ids = {str(g.get("id")) for g in scored}
-
+        needed           = k - len(scored)
+        pass1_ids        = {str(g.get("id")) for g in scored}
         requested_vibes  = set(request.vibe or []) if request else set()
-        occasion_vibes   = set(OCCASION_VIBE_AFFINITY.get(
-            getattr(request, "occasion", "") or "", []
-        ))
+        occasion_vibes   = set(OCCASION_VIBE_AFFINITY.get(getattr(request, "occasion", "") or "", []))
         request_occasion = getattr(request, "occasion", None) if request else None
 
         fallback_candidates = []
         for g, current_price in normalised:
             if str(g.get("id")) in pass1_ids:
                 continue
-
             g_vibes     = set(g.get("vibe") or [])
             g_occasions = set(g.get("occasions") or [])
-
             if g_vibes & requested_vibes:
                 fallback_tier = 1
             elif g_vibes & occasion_vibes:
@@ -919,7 +804,6 @@ def retrieve_gifts(
                 fallback_tier = 3
             else:
                 fallback_tier = 4
-
             sim_score = float(g.get("similarity") or 0)
             fallback_candidates.append((fallback_tier, sim_score, g, current_price))
 
@@ -932,9 +816,7 @@ def retrieve_gifts(
             _score_gift(g, current_price, is_fallback=True)
             scored.append(g)
             added += 1
-            logger.info(
-                f"Pass 2 (tier {tier}, sim {sim_score:.2f}) added fallback: '{g.get('display_name')}'"
-            )
+            logger.info(f"Pass 2 (tier {tier}, sim {sim_score:.2f}) added fallback: '{g.get('display_name')}'")
 
     # --------------------------------------------------
     # DIVERSITY + FINAL SORT
