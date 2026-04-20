@@ -10,24 +10,92 @@ let isManualEntry = false; // Track whether we're in manual mode
 
 // ============================================
 // Constants for multi-select options
+// All values here are locked to the quiz vocabulary in quizRules.ts
+// and retrieval.py. Do not add values that don't exist in both places —
+// unrecognized tags silently do nothing at retrieval time.
 // ============================================
 
 const OPTIONS = {
-    categories: ["tech", "home", "kitchen", "fashion", "beauty", "fitness", "outdoors", "hobby", "book", "experiences"],
-    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "tea", "fashion", "skincare", "makeup"],
-    occasions: ["birthday", "anniversary", "valentines", "mothers_day", "holiday", "christmas", "wedding", "engagement", "graduation", "just_because"],
+    // gift_type — matches GIFT_TYPE_META keys in quizRules.ts
+    // NOTE: 'fashion' kept for legacy re-tagging only; avoid using on new products
+    categories: [
+        "tech",
+        "kitchen",
+        "home",
+        "fitness",
+        "beauty",
+        "outdoors",
+        "book",
+        "hobby",
+        "jewelry",       // ← added (was missing, causes scoring gaps on Valentine's/anniversary)
+        "loungewear",    // ← added (was missing, causes scoring gaps on Valentine's/anniversary)
+        "fashion",       // ← legacy only; 6 existing products use this; avoid on new products
+    ],
+
+    // interests — matches InterestKey in quizRules.ts
+    interests: [
+        "coffee",
+        "cooking",
+        "baking",
+        "wine",
+        "cocktails",
+        "fitness",
+        "running",
+        "cycling",
+        "yoga",
+        "reading",
+        "music",
+        "gaming",
+        "photography",
+        "art",
+        "travel",
+        "hiking",
+        "camping",
+        "gardening",
+        "movies",
+        "fashion",
+        "skincare",
+        "makeup",
+        "wellness",      // ← added (was missing)
+        "home_decor",    // ← added (was missing)
+        "pets",          // ← added (was missing)
+        // REMOVED: "tea" — not in quiz vocabulary, never matches
+    ],
+
+    // occasions — matches OccasionKey in quizRules.ts + retrieval.py
+    occasions: [
+        "birthday",
+        "valentines",
+        "anniversary",
+        "christmas",
+        "mothers_day",
+        "just_because",
+        "apology",       // ← added (was missing — one of 7 core occasions)
+        // REMOVED: "holiday", "wedding", "engagement", "graduation"
+        // These are not in the quiz vocabulary and never match retrieval queries
+    ],
+
     gender: ["male", "female", "unisex"],
-    relationship: ["partner", "spouse", "boyfriend", "girlfriend", "friend", "family"],
-    vibe: ["romantic", "practical", "luxury", "fun", "sentimental", "creative", "cozy", "adventurous", "minimalist"],
-    traits: ["introverted", "extroverted", "analytical", "creative", "sentimental", "adventurous", "organized", "relaxed", "curious"]
+
+    // vibe — matches VibeKey in quizRules.ts
+    vibe: [
+        "romantic",
+        "sentimental",
+        "pampering",     // ← added (was missing)
+        "luxe",          // ← renamed from "luxury" (correct key is "luxe")
+        "cozy",
+        "fun",
+        "thoughtful",    // ← added (was missing)
+        // REMOVED: "practical", "luxury", "creative", "adventurous", "minimalist"
+        // None of these exist in the quiz vocabulary
+    ],
 };
 
 const LIMITS = {
-    categories: 2,
-    interests: 5,
-    occasions: 4,
-    vibe: 3,
-    traits: 3
+    categories: 3,   // bumped from 2 — existing gifts use up to 3 gift_types
+    interests:  5,
+    occasions:  6,   // bumped from 4 — DB constraint allows 6 (validate_gift_arrays)
+    vibe:       3,
 };
 
 // ============================================
@@ -137,19 +205,16 @@ function displayProductPreview(product) {
 function getQualityIndicators(product) {
     let html = '';
 
-    // Rating indicator
     if (product.rating) {
         const ratingClass = product.rating >= 4.0 ? 'excellent' : product.rating >= 3.0 ? 'warning' : 'poor';
         html += `<span class="quality-indicator quality-${ratingClass}">⭐ ${product.rating}/5</span>`;
     }
 
-    // Reviews indicator
     if (product.review_count !== undefined) {
         const reviewClass = product.review_count >= 50 ? 'excellent' : product.review_count >= 10 ? 'warning' : 'poor';
         html += `<span class="quality-indicator quality-${reviewClass}">💬 ${product.review_count} reviews</span>`;
     }
 
-    // Stock indicator
     const stockClass = product.in_stock ? 'excellent' : 'poor';
     const stockText = product.in_stock ? '✓ In Stock' : '✗ Out of Stock';
     html += `<span class="quality-indicator quality-${stockClass}">${stockText}</span>`;
@@ -158,36 +223,28 @@ function getQualityIndicators(product) {
 }
 
 // ============================================
-// Step 1b: Manual Entry (NEW)
+// Step 1b: Manual Entry
 // ============================================
 
 function addManually() {
     isManualEntry = true;
     currentProduct = null;
 
-    // Hide the preview panel if it was showing from a previous attempt
     document.getElementById('productPreview').style.display = 'none';
 
-    // Skip straight to the form — bypass the AI categorization step
-    // since there's no scraped name/description to pass to the AI
     populateProductForm(null, null);
 
     document.getElementById('productForm').style.display = 'block';
-
-    // Optionally show categorization section so admin can still request AI
-    // suggestions once they've typed in a name + description
     document.getElementById('categorizationSection').style.display = 'block';
 
-    // Update the form title to signal manual mode
     document.getElementById('formTitle').textContent = 'Add Product Details';
     const badge = document.getElementById('modeBadge');
     badge.textContent = '✏️ Manual Entry';
     badge.className = 'mode-badge mode-badge-manual';
     badge.style.display = 'inline-block';
 
-    showAlert('Fill in the product details below. You can still use AI to suggest categories once you\'ve entered a name and description.', 'info');
+    showAlert("Fill in the product details below. You can still use AI to suggest categories once you've entered a name and description.", 'info');
 
-    // Scroll down to the form
     document.getElementById('productForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -196,7 +253,6 @@ function addManually() {
 // ============================================
 
 async function categorizeProduct() {
-    // In manual mode, pull the name/description from the form itself
     const name = isManualEntry
         ? document.getElementById('productName').value
         : currentProduct?.name;
@@ -224,7 +280,6 @@ async function categorizeProduct() {
             brand
         });
 
-        // Apply AI suggestions to the checkboxes
         applyCategorizationToForm(categorization);
 
         showAlert('AI categorization applied! Review and adjust as needed.', 'success');
@@ -241,7 +296,6 @@ async function categorizeProduct() {
 // ============================================
 
 function populateProductForm(product, categorization) {
-    // Basic fields — fill from product data if available, otherwise leave empty
     document.getElementById('productName').value = product?.name || '';
     document.getElementById('displayName').value = product?.display_name || '';
     document.getElementById('description').value = product?.description || '';
@@ -255,7 +309,6 @@ function populateProductForm(product, categorization) {
     document.getElementById('reviewCount').value = product?.review_count || '';
     document.getElementById('inStock').checked = product?.in_stock !== false;
 
-    // Update the form title badge for scraped mode
     if (!isManualEntry && product) {
         document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
         const badge = document.getElementById('modeBadge');
@@ -264,21 +317,16 @@ function populateProductForm(product, categorization) {
         badge.style.display = 'inline-block';
     }
 
-    // Initialize all multi-select fields
     initMultiSelect('categories', OPTIONS.categories, LIMITS.categories);
     initMultiSelect('interests', OPTIONS.interests, LIMITS.interests);
     initMultiSelect('occasions', OPTIONS.occasions, LIMITS.occasions);
     initMultiSelect('gender', OPTIONS.gender);
-    initMultiSelect('relationship', OPTIONS.relationship);
     initMultiSelect('vibe', OPTIONS.vibe, LIMITS.vibe);
-    initMultiSelect('traits', OPTIONS.traits, LIMITS.traits);
 
-    // Apply AI categorization suggestions if provided
     if (categorization) {
         applyCategorizationToForm(categorization);
     }
 
-    // Setup form submission
     document.getElementById('editForm').onsubmit = saveProduct;
 }
 
@@ -287,21 +335,24 @@ function applyCategorizationToForm(categorization) {
     setMultiSelectValues('interests', categorization.interests || []);
     setMultiSelectValues('occasions', categorization.occasions || []);
     setMultiSelectValues('gender', categorization.recipient?.gender || []);
-    setMultiSelectValues('relationship', categorization.recipient?.relationship || []);
     setMultiSelectValues('vibe', categorization.vibe || []);
-    setMultiSelectValues('traits', categorization.personality_traits || []);
     if (categorization.experience_level) {
-        document.getElementById('experienceLevel').value = categorization.experience_level;
+        const el = document.getElementById('experienceLevel');
+        if (el) el.value = categorization.experience_level;
     }
 }
 
 function initMultiSelect(fieldName, options, maxLimit = null) {
     const container = document.getElementById(`${fieldName}Container`);
+    if (!container) return;
     container.innerHTML = '';
 
     options.forEach(option => {
         const div = document.createElement('div');
         div.className = 'checkbox-item';
+
+        // Flag legacy-only options visually
+        const isLegacy = fieldName === 'categories' && option === 'fashion';
 
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
@@ -315,8 +366,25 @@ function initMultiSelect(fieldName, options, maxLimit = null) {
 
         const label = document.createElement('label');
         label.htmlFor = `${fieldName}_${option}`;
-        // Make Mother's Day label human-friendly
-        label.textContent = option === 'mothers_day' ? "Mother's Day" : option;
+
+        // Human-friendly labels for underscore keys
+        const labelMap = {
+            mothers_day: "Mother's Day",
+            just_because: "Just Because",
+            home_decor: "Candles & Home",
+            home: "Home & Décor",
+            loungewear: "Loungewear & Cozy",
+            luxe: "Luxe",
+            pampering: "Pampering",
+            thoughtful: "Thoughtful",
+        };
+        label.textContent = labelMap[option] || option;
+
+        if (isLegacy) {
+            label.textContent += ' (legacy)';
+            label.style.color = '#999';
+            label.style.fontStyle = 'italic';
+        }
 
         div.appendChild(checkbox);
         div.appendChild(label);
@@ -344,6 +412,7 @@ function setMultiSelectValues(fieldName, values) {
 
 function getMultiSelectValues(fieldName) {
     const container = document.getElementById(`${fieldName}Container`);
+    if (!container) return [];
     const checkboxes = container.querySelectorAll('input[type="checkbox"]:checked');
     return Array.from(checkboxes).map(cb => cb.value);
 }
@@ -360,13 +429,10 @@ function updateLimitIndicator(fieldName, maxLimit) {
     indicator.classList.remove('warning', 'error');
     if (count === maxLimit) {
         indicator.classList.add('warning');
-
         const container = document.getElementById(`${fieldName}Container`);
         const checkboxes = container.querySelectorAll('input[type="checkbox"]');
         checkboxes.forEach(cb => {
-            if (!cb.checked) {
-                cb.disabled = true;
-            }
+            if (!cb.checked) cb.disabled = true;
         });
     } else if (count > maxLimit) {
         indicator.classList.add('error');
@@ -390,7 +456,7 @@ async function saveProduct(event) {
     for (const [field, limit] of Object.entries(LIMITS)) {
         const values = getMultiSelectValues(field);
         if (values.length > limit) {
-            showAlert(`${field} cannot have more than ${limit} items`, 'error');
+            showAlert(`${field} cannot have more than ${limit} items selected`, 'error');
             return;
         }
     }
@@ -403,28 +469,24 @@ async function saveProduct(event) {
         const reviewCountVal = document.getElementById('reviewCount').value;
 
         const product = {
-            name: document.getElementById('productName').value,
-            display_name: document.getElementById('displayName').value || null,
-            description: document.getElementById('description').value,
-            brand: document.getElementById('brand').value,
-            price: parseFloat(document.getElementById('price').value),
-            currency: document.getElementById('currency').value,
-            link: document.getElementById('link').value,
-            image_url: document.getElementById('imageUrl').value,
-            source: document.getElementById('source').value,
-            categories: getMultiSelectValues('categories'),
-            interests: getMultiSelectValues('interests'),
-            occasions: getMultiSelectValues('occasions'),
-            vibe: getMultiSelectValues('vibe'),
-            personality_traits: getMultiSelectValues('traits'),
-            recipient: {
-                gender: getMultiSelectValues('gender'),
-                relationship: getMultiSelectValues('relationship')
-            },
-            experience_level: document.getElementById('experienceLevel').value,
-            rating: ratingVal ? parseFloat(ratingVal) : (currentProduct?.rating || null),
-            review_count: reviewCountVal ? parseInt(reviewCountVal) : (currentProduct?.review_count || 0),
-            in_stock: document.getElementById('inStock').checked
+            name:            document.getElementById('productName').value,
+            display_name:    document.getElementById('displayName').value || null,
+            description:     document.getElementById('description').value,
+            brand:           document.getElementById('brand').value,
+            price:           parseFloat(document.getElementById('price').value),
+            currency:        document.getElementById('currency').value,
+            link:            document.getElementById('link').value,
+            image_url:       document.getElementById('imageUrl').value,
+            source:          document.getElementById('source').value,
+            // 'categories' in the form maps to 'gift_type' in the DB schema
+            gift_type:       getMultiSelectValues('categories'),
+            interests:       getMultiSelectValues('interests'),
+            occasions:       getMultiSelectValues('occasions'),
+            vibe:            getMultiSelectValues('vibe'),
+            gender_skew:     getMultiSelectValues('gender')[0] || 'unisex',
+            rating:          ratingVal ? parseFloat(ratingVal) : (currentProduct?.rating || null),
+            review_count:    reviewCountVal ? parseInt(reviewCountVal) : (currentProduct?.review_count || 0),
+            in_stock:        document.getElementById('inStock').checked,
         };
 
         const saved = await apiRequest('/products', 'POST', {
@@ -434,7 +496,6 @@ async function saveProduct(event) {
 
         showAlert(`Product saved successfully! ID: ${saved.id}`, 'success');
 
-        // Reset form after 2 seconds
         setTimeout(() => {
             resetForm();
         }, 2000);

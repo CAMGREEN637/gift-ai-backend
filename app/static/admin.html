@@ -191,7 +191,6 @@
             box-shadow: 0 4px 8px rgba(100, 116, 139, 0.3);
         }
 
-        /* Manual entry button - distinct styling */
         .btn-manual {
             background: white;
             color: #667eea;
@@ -204,7 +203,6 @@
             box-shadow: 0 4px 8px rgba(102, 126, 234, 0.2);
         }
 
-        /* Divider between fetch and manual entry */
         .or-divider {
             display: inline-flex;
             align-items: center;
@@ -232,20 +230,9 @@
             margin-right: 10px;
         }
 
-        .quality-excellent {
-            background: #d1fae5;
-            color: #065f46;
-        }
-
-        .quality-warning {
-            background: #fef3c7;
-            color: #92400e;
-        }
-
-        .quality-poor {
-            background: #fee2e2;
-            color: #991b1b;
-        }
+        .quality-excellent { background: #d1fae5; color: #065f46; }
+        .quality-warning   { background: #fef3c7; color: #92400e; }
+        .quality-poor      { background: #fee2e2; color: #991b1b; }
 
         .product-preview {
             display: grid;
@@ -263,15 +250,8 @@
             border-radius: 6px;
         }
 
-        .preview-details h3 {
-            margin-bottom: 10px;
-            color: #111;
-        }
-
-        .preview-details p {
-            margin-bottom: 8px;
-            color: #666;
-        }
+        .preview-details h3 { margin-bottom: 10px; color: #111; }
+        .preview-details p  { margin-bottom: 8px; color: #666; }
 
         .loading {
             display: none;
@@ -279,9 +259,7 @@
             padding: 20px;
         }
 
-        .loading.active {
-            display: block;
-        }
+        .loading.active { display: block; }
 
         .spinner {
             border: 3px solid #f3f3f3;
@@ -294,7 +272,7 @@
         }
 
         @keyframes spin {
-            0% { transform: rotate(0deg); }
+            0%   { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
 
@@ -305,33 +283,11 @@
             display: none;
         }
 
-        .alert.show {
-            display: block;
-        }
-
-        .alert-success {
-            background: #d1fae5;
-            color: #065f46;
-            border-left: 4px solid #10b981;
-        }
-
-        .alert-error {
-            background: #fee2e2;
-            color: #991b1b;
-            border-left: 4px solid #ef4444;
-        }
-
-        .alert-info {
-            background: #dbeafe;
-            color: #1e40af;
-            border-left: 4px solid #3b82f6;
-        }
-
-        .alert-warning {
-            background: #fef3c7;
-            color: #92400e;
-            border-left: 4px solid #f59e0b;
-        }
+        .alert.show    { display: block; }
+        .alert-success { background: #d1fae5; color: #065f46; border-left: 4px solid #10b981; }
+        .alert-error   { background: #fee2e2; color: #991b1b; border-left: 4px solid #ef4444; }
+        .alert-info    { background: #dbeafe; color: #1e40af; border-left: 4px solid #3b82f6; }
+        .alert-warning { background: #fef3c7; color: #92400e; border-left: 4px solid #f59e0b; }
 
         .grid-2 {
             display: grid;
@@ -339,7 +295,6 @@
             gap: 20px;
         }
 
-        /* Badge shown in the form header when in manual mode */
         .mode-badge {
             display: inline-block;
             padding: 3px 10px;
@@ -350,25 +305,12 @@
             vertical-align: middle;
         }
 
-        .mode-badge-manual {
-            background: #fef3c7;
-            color: #92400e;
-        }
-
-        .mode-badge-scraped {
-            background: #d1fae5;
-            color: #065f46;
-        }
+        .mode-badge-manual  { background: #fef3c7; color: #92400e; }
+        .mode-badge-scraped { background: #d1fae5; color: #065f46; }
 
         @media (max-width: 768px) {
-            .grid-2 {
-                grid-template-columns: 1fr;
-            }
-
-            .btn-manual {
-                margin-left: 0;
-                margin-top: 10px;
-            }
+            .grid-2 { grid-template-columns: 1fr; }
+            .btn-manual { margin-left: 0; margin-top: 10px; }
         }
     </style>
 </head>
@@ -506,16 +448,18 @@
 
                     <!-- Right Column -->
                     <div>
+                        <!-- FIX: was "Max 2", raised to Max 4 to match JS LIMITS -->
                         <div class="form-group">
-                            <label>Gift Type (Max 2)</label>
+                            <label>Gift Type (Max 4)</label>
                             <div class="multi-select-container" id="gift_typeContainer"></div>
-                            <div id="gift_typeLimit" class="limit-indicator">0/2 selected</div>
+                            <div id="gift_typeLimit" class="limit-indicator">0/4 selected</div>
                         </div>
 
+                        <!-- FIX: was "Max 8", corrected to Max 5 to match quiz cap -->
                         <div class="form-group">
-                            <label>Interests (Max 8)</label>
+                            <label>Interests (Max 5)</label>
                             <div class="multi-select-container" id="interestsContainer"></div>
-                            <div id="interestsLimit" class="limit-indicator">0/8 selected</div>
+                            <div id="interestsLimit" class="limit-indicator">0/5 selected</div>
                         </div>
 
                         <div class="form-group">
@@ -564,17 +508,80 @@ const API_KEY = prompt('Enter Admin API Key:') || '';
 let currentProduct = null;
 let isManualEntry = false;
 
+// =============================================================================
+// OPTIONS — matches quiz vocabulary exactly:
+//   GiftTypeKey, InterestKey, OccasionKey, VibeKey from quizRules.ts
+//   GIFT_TYPE_OCCASION_AFFINITY, OCCASION_VIBE_AFFINITY from retrieval.py
+//
+// Changes from previous version:
+//   gift_type: added "jewelry", "loungewear"; removed "fashion"
+//   interests: unchanged (already correct)
+//   occasions: removed "wedding", "engagement", "graduation" (not in quiz)
+//   vibe:      unchanged (already correct)
+// =============================================================================
+
 const OPTIONS = {
-    gift_type: ["tech", "home", "kitchen", "fashion", "beauty", "fitness", "outdoors", "hobby", "book"],
-    interests: ["coffee", "cooking", "baking", "fitness", "running", "yoga", "gaming", "photography", "music", "travel", "reading", "art", "gardening", "cycling", "hiking", "camping", "movies", "wine", "cocktails", "fashion", "skincare", "makeup", "pets", "wellness", "home_decor"],
-    occasions: ["birthday", "anniversary", "valentines", "mothers_day", "christmas", "wedding", "engagement", "graduation", "apology", "just_because"],
+    // Matches GiftTypeKey in quizRules.ts
+    gift_type: [
+        "tech", "kitchen", "home", "fitness", "beauty",
+        "outdoors", "book", "hobby", "jewelry", "loungewear"
+    ],
+
+    // Matches InterestKey in quizRules.ts
+    interests: [
+        "coffee", "cooking", "baking", "wine", "cocktails",
+        "fitness", "running", "cycling", "yoga", "reading",
+        "music", "gaming", "photography", "art", "travel",
+        "hiking", "camping", "gardening", "movies", "fashion",
+        "skincare", "makeup", "wellness", "home_decor", "pets"
+    ],
+
+    // Matches OccasionKey in quizRules.ts
+    // Removed: "wedding", "engagement", "graduation" — not in quiz vocabulary,
+    // caused invalid DB tags that had to be cleaned up in the migration.
+    occasions: [
+        "birthday", "valentines", "anniversary", "christmas",
+        "mothers_day", "just_because", "apology"
+    ],
+
     gender_skew: ["female", "male", "unisex"],
-    vibe: ["pampering", "romantic", "sentimental", "luxe", "cozy", "fun", "thoughtful"]
+
+    // Matches VibeKey in quizRules.ts
+    vibe: [
+        "pampering", "romantic", "sentimental", "luxe",
+        "cozy", "fun", "thoughtful"
+    ]
 };
 
-const LIMITS = { gift_type: 2, interests: 8, occasions: 6, vibe: 3 };
+// =============================================================================
+// LIMITS — aligned to quiz caps and DB constraint (validate_gift_arrays)
+//   gift_type: 4  (raised from 2 — products often span multiple types)
+//   interests: 5  (corrected from 8 — quiz caps at 5)
+//   occasions: 6  (matches DB max constraint exactly)
+//   vibe:      3  (unchanged)
+// =============================================================================
 
-const OPTION_LABELS = { mothers_day: "Mother's Day", just_because: "Just Because", home_decor: "Home Decor", gift_type: "Gift Type", gender_skew: "Gender Skew", luxe: "Luxe" };
+const LIMITS = {
+    gift_type: 4,
+    interests: 5,
+    occasions: 6,
+    vibe:      3
+};
+
+// Human-friendly display labels for values that need them
+const OPTION_LABELS = {
+    mothers_day: "Mother's Day",
+    just_because: "Just Because",
+    home_decor:   "Candles & Home",
+    loungewear:   "Loungewear & Cozy",
+    luxe:         "Luxe",
+    pampering:    "Pampering",
+    thoughtful:   "Thoughtful",
+    gift_type:    "Gift Type",
+    gender_skew:  "Gender Skew",
+};
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function showAlert(message, type = 'info') {
     const el = document.getElementById('alert');
@@ -602,7 +609,7 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
     return response.json();
 }
 
-// ── Step 1a: Fetch from Amazon ──────────────────────────────────────────────
+// ── Step 1a: Fetch from Amazon ────────────────────────────────────────────────
 
 async function fetchAmazonProduct() {
     const url = document.getElementById('amazonUrl').value;
@@ -617,7 +624,6 @@ async function fetchAmazonProduct() {
         isManualEntry = false;
         displayProductPreview(currentProduct);
 
-        // Populate and show the form immediately so checkboxes exist before AI categorization runs
         populateProductForm(currentProduct, null);
         document.getElementById('productForm').style.display = 'block';
         document.getElementById('categorizationSection').style.display = 'block';
@@ -667,7 +673,7 @@ function getQualityIndicators(product) {
     return html;
 }
 
-// ── Step 1b: Manual Entry ───────────────────────────────────────────────────
+// ── Step 1b: Manual Entry ─────────────────────────────────────────────────────
 
 function addManually() {
     isManualEntry = true;
@@ -690,13 +696,12 @@ function addManually() {
     document.getElementById('productForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// ── Step 2: AI Categorization ───────────────────────────────────────────────
+// ── Step 2: AI Categorization ─────────────────────────────────────────────────
 
 async function categorizeProduct() {
-    // Always read from the form — works for both scraped and manual entry
-    const name = document.getElementById('productName').value;
+    const name        = document.getElementById('productName').value;
     const description = document.getElementById('description').value;
-    const brand = document.getElementById('brand').value;
+    const brand       = document.getElementById('brand').value;
 
     if (!name) { showAlert('Please enter a product name before requesting AI categorization', 'error'); return; }
 
@@ -715,22 +720,22 @@ async function categorizeProduct() {
     }
 }
 
-// ── Step 3: Product Form ────────────────────────────────────────────────────
+// ── Step 3: Product Form ──────────────────────────────────────────────────────
 
 function populateProductForm(product, categorization) {
-    document.getElementById('productName').value    = product?.name || '';
-    document.getElementById('displayName').value    = product?.display_name || '';
-    document.getElementById('description').value    = product?.description || '';
-    document.getElementById('brand').value          = product?.brand || '';
-    document.getElementById('price').value          = product?.price || '';
-    document.getElementById('currency').value       = product?.currency || 'USD';
-    document.getElementById('link').value           = product?.link || product?.product_url || '';
-    document.getElementById('imageUrl').value       = product?.image_url || '';
-    document.getElementById('source').value         = product?.source || 'amazon';
-    document.getElementById('rating').value         = product?.rating ?? '';
-    document.getElementById('reviewCount').value    = product?.review_count ?? '';
-    document.getElementById('inStock').checked      = product?.in_stock !== false && product?.in_stock !== 0;
-    document.getElementById('gender_skew').value    = product?.gender_skew || 'unisex';
+    document.getElementById('productName').value  = product?.name || '';
+    document.getElementById('displayName').value  = product?.display_name || '';
+    document.getElementById('description').value  = product?.description || '';
+    document.getElementById('brand').value        = product?.brand || '';
+    document.getElementById('price').value        = product?.price || '';
+    document.getElementById('currency').value     = product?.currency || 'USD';
+    document.getElementById('link').value         = product?.link || product?.product_url || '';
+    document.getElementById('imageUrl').value     = product?.image_url || '';
+    document.getElementById('source').value       = product?.source || 'amazon';
+    document.getElementById('rating').value       = product?.rating ?? '';
+    document.getElementById('reviewCount').value  = product?.review_count ?? '';
+    document.getElementById('inStock').checked    = product?.in_stock !== false && product?.in_stock !== 0;
+    document.getElementById('gender_skew').value  = product?.gender_skew || 'unisex';
 
     if (!isManualEntry && product) {
         document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
@@ -751,10 +756,10 @@ function populateProductForm(product, categorization) {
 }
 
 function applyCategorizationToForm(cat) {
-    setMultiSelectValues('gift_type',  cat.gift_type   || cat.categories || []);
-    setMultiSelectValues('interests',  cat.interests   || []);
-    setMultiSelectValues('occasions',  cat.occasions   || []);
-    setMultiSelectValues('vibe',       cat.vibe        || []);
+    setMultiSelectValues('gift_type', cat.gift_type || cat.categories || []);
+    setMultiSelectValues('interests', cat.interests  || []);
+    setMultiSelectValues('occasions', cat.occasions  || []);
+    setMultiSelectValues('vibe',      cat.vibe       || []);
     if (cat.gender_skew) document.getElementById('gender_skew').value = cat.gender_skew;
 }
 
@@ -764,14 +769,17 @@ function initMultiSelect(fieldName, options, maxLimit = null) {
     options.forEach(option => {
         const div = document.createElement('div');
         div.className = 'checkbox-item';
+
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.id = `${fieldName}_${option}`;
         checkbox.value = option;
         checkbox.onchange = () => { if (maxLimit) updateLimitIndicator(fieldName, maxLimit); };
+
         const label = document.createElement('label');
         label.htmlFor = `${fieldName}_${option}`;
         label.textContent = OPTION_LABELS[option] || option;
+
         div.appendChild(checkbox);
         div.appendChild(label);
         container.appendChild(div);
@@ -794,13 +802,12 @@ function getMultiSelectValues(fieldName) {
 }
 
 function updateLimitIndicator(fieldName, maxLimit) {
-    const count = getMultiSelectValues(fieldName).length;
+    const count     = getMultiSelectValues(fieldName).length;
     const indicator = document.getElementById(`${fieldName}Limit`);
     if (!indicator) return;
     indicator.textContent = `${count}/${maxLimit} selected`;
     indicator.classList.remove('warning', 'error');
-    const container = document.getElementById(`${fieldName}Container`);
-    const checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    const checkboxes = document.getElementById(`${fieldName}Container`).querySelectorAll('input[type="checkbox"]');
     if (count >= maxLimit) {
         indicator.classList.add('warning');
         checkboxes.forEach(cb => { if (!cb.checked) cb.disabled = true; });
@@ -809,7 +816,7 @@ function updateLimitIndicator(fieldName, maxLimit) {
     }
 }
 
-// ── Save Product ────────────────────────────────────────────────────────────
+// ── Save Product ──────────────────────────────────────────────────────────────
 
 async function saveProduct(event) {
     event.preventDefault();
@@ -862,13 +869,13 @@ async function saveProduct(event) {
 
 function resetForm() {
     currentProduct = null;
-    isManualEntry = false;
-    document.getElementById('amazonUrl').value = '';
+    isManualEntry  = false;
+    document.getElementById('amazonUrl').value              = '';
     document.getElementById('productPreview').style.display = 'none';
     document.getElementById('categorizationSection').style.display = 'none';
-    document.getElementById('productForm').style.display = 'none';
-    document.getElementById('modeBadge').style.display = 'none';
-    document.getElementById('formTitle').textContent = 'Step 3: Review & Edit Product Details';
+    document.getElementById('productForm').style.display    = 'none';
+    document.getElementById('modeBadge').style.display      = 'none';
+    document.getElementById('formTitle').textContent        = 'Step 3: Review & Edit Product Details';
 }
 
 document.addEventListener('DOMContentLoaded', () => {
