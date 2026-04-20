@@ -46,15 +46,13 @@ def generate_embedding(text: str) -> List[float]:
 
 
 def normalize_jsonb_field(value) -> List[str]:
-    """Convert JSONB field to list of strings"""
+    """Convert JSONB field to list of strings."""
     if value is None:
         return []
 
-    # If it's already a list
     if isinstance(value, list):
         return [str(item) for item in value]
 
-    # If it's a string (JSON string), parse it
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
@@ -64,53 +62,56 @@ def normalize_jsonb_field(value) -> List[str]:
         except:
             return [value]
 
-    # If it's some other type, convert to string
     return [str(value)]
 
 
 def create_gift_text_for_embedding(gift: Dict) -> str:
     """
     Create a rich text representation of a gift for embedding.
-    This is what gets converted to a vector.
+    This is what gets converted to a vector and stored in Supabase.
+
+    FIX (v2): reads gift_type (not categories) since that is the actual
+    column name in Supabase. The old version used gift.get("categories")
+    which always returned empty, silently dropping the gift-type dimension
+    from every embedding in the catalog.
     """
     parts = []
 
-    # Name (most important)
+    # Name (most important — anchors the semantic space)
     if gift.get("name"):
         parts.append(gift["name"])
 
-    # Description
+    # Description (truncated to save tokens)
     if gift.get("description"):
-        # Truncate to first 500 chars to save tokens
         parts.append(gift["description"][:500])
 
-    # Interests (very important for matching)
+    # Interests (critical for confident-mode interest matching)
     interests = normalize_jsonb_field(gift.get("interests"))
     if interests:
         parts.append("Interests: " + ", ".join(interests))
 
-    # Categories
-    categories = normalize_jsonb_field(gift.get("categories"))
-    if categories:
-        parts.append("Categories: " + ", ".join(categories))
+    # Gift type — FIX: was gift.get("categories") which doesn't exist in Supabase.
+    # Fall back to "categories" only for legacy callers that pre-normalize the field.
+    gift_type = normalize_jsonb_field(gift.get("gift_type") or gift.get("categories"))
+    if gift_type:
+        parts.append("Categories: " + ", ".join(gift_type))
 
-    # Occasions
+    # Occasions (helps vector search surface occasion-appropriate gifts)
     occasions = normalize_jsonb_field(gift.get("occasions"))
     if occasions:
         parts.append("Occasions: " + ", ".join(occasions))
 
-    # Vibe
+    # Vibe (drives vibe-match scoring in compute_quiz_signal_score)
     vibe = normalize_jsonb_field(gift.get("vibe"))
     if vibe:
         parts.append("Vibe: " + ", ".join(vibe))
 
-    # Combine everything
     result = " | ".join(parts)
     logger.debug("Created embedding text: " + result[:100] + "...")
     return result
 
 
-def update_gift_embedding(gift_id: str, embedding: List[float]):
+def update_gift_embedding(gift_id: str, embedding: List[float]) -> bool:
     """
     Update a gift's embedding in Supabase.
     """
@@ -118,14 +119,11 @@ def update_gift_embedding(gift_id: str, embedding: List[float]):
 
     try:
         supabase = get_supabase_client()
-
-        # Convert list to format Supabase expects
         response = supabase.table('gifts').update({
             'embedding': embedding
         }).eq('id', gift_id).execute()
 
         logger.debug("Update response for " + gift_id + ": " + str(len(response.data)) + " rows")
-
         return True
     except Exception as e:
         logger.error("Error updating embedding for gift " + gift_id + ": " + str(e))

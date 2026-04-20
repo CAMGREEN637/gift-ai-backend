@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Depends, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 import json
 import httpx
 import logging
@@ -39,10 +40,10 @@ from app.persistence import (
 from app.database import init_db, get_db
 from app.dependencies import check_rate_limit_dependency
 from app.rate_limiter import record_token_usage
+from app.admin_api import router as admin_router, verify_admin
 from supabase import Client
 
 # Import routers
-from app.admin_api import router as admin_router
 from app.partners_api import router as partners_router
 from app.user_profile_api import router as user_profile_router
 
@@ -162,7 +163,7 @@ def require_api_key(x_api_key: str = Header(None)):
 
 # =============================================================================
 # IMAGE PROXY
-# Proxies Amazon images to avoid CORS issues — unchanged from original
+# Proxies Amazon images to avoid CORS issues
 # =============================================================================
 
 @app.get("/proxy-image")
@@ -226,37 +227,18 @@ def submit_feedback(feedback: GiftFeedback):
 
 # =============================================================================
 # POST /recommend
-#
-# Changed from GET to POST to support the RecommendRequest body.
-#
-# Everything from the original is preserved:
-#   - Parallel DB reads (preferences + inferred + recipient profile)
-#   - Merged preferences (quiz interests take priority)
-#   - Partner context resolution (saved recipient → partner_name fallback)
-#   - Confidence threshold filter (0.8+)
-#   - Non-streaming and SSE streaming paths (?stream=true)
-#   - Token usage recording
-#   - All perf logging
-#
-# New additions from updated schema:
-#   - Query built from quiz signals via build_search_query()
-#   - Full RecommendRequest passed to retrieve_gifts() for quiz scoring
-#   - relationship_stage replaces raw relationship string
-#   - Quiz interests excluded from merged_preferences when confidence='lost'
-#   - results_headline/subline added to both streaming and non-streaming responses
 # =============================================================================
 
 @app.post("/recommend")
 async def recommend(
     body: RecommendRequest,
-    stream: bool = Query(default=False),   # ?stream=true enables SSE
+    stream: bool = Query(default=False),
     db: Client = Depends(get_db),
     ip_address: str = Depends(check_rate_limit_dependency),
 ):
     t_total = time.time()
 
-    # Convenience locals from request body
-    user_id            = body.partner_id   # partner_id doubles as user session id
+    user_id            = body.partner_id
     partner_id         = body.partner_id
     partner_name       = body.partner_name
     _raw_max_price = body.max_price
@@ -277,12 +259,11 @@ async def recommend(
         )
     )
 
-    # Build the natural language query from quiz signals for embedding
     query = build_search_query(body)
     logger.info("Built search query: %s" % query)
 
     # ------------------------------------------------------------------
-    # PARALLEL DB READS — unchanged from original
+    # PARALLEL DB READS
     # ------------------------------------------------------------------
     t_db = time.time()
 
@@ -320,13 +301,11 @@ async def recommend(
 
     explicit = explicit_raw or {"interests": [], "vibe": []}
 
-    # Quiz interests excluded when user said "honestly lost" —
-    # no point merging interests they admitted they don't know
     quiz_interests = list(body.interests or []) if confidence != "lost" else []
 
     merged_preferences = {
         "interests": list(set(
-            quiz_interests                  # quiz takes priority
+            quiz_interests
             + explicit["interests"]
             + [
                 key
@@ -347,7 +326,7 @@ async def recommend(
     logger.info("Merged preferences: %s" % merged_preferences)
 
     # ------------------------------------------------------------------
-    # RESOLVE PARTNER PROFILE — unchanged from original
+    # RESOLVE PARTNER PROFILE
     # ------------------------------------------------------------------
     partner_profile      = None
     partner_context      = None
@@ -379,12 +358,7 @@ async def recommend(
 
     # ------------------------------------------------------------------
     # RETRIEVE GIFTS
-    # Pass full RecommendRequest as `request` to activate quiz scoring.
-    # All other params unchanged from original.
     # ------------------------------------------------------------------
-    # k — for load-more (exclude_names present), request base_k + exclusion count
-    # so after stripping already-shown gifts we still have base_k results.
-    # For normal requests, just use base_k.
     _raw_k = body.k
     if _raw_k is not None and not (1 <= _raw_k <= 20):
         logger.warning("k=%s is out of range [1, 20] — clamping to 5", _raw_k)
@@ -398,7 +372,7 @@ async def recommend(
         retrieve_gifts,
         query,
         user_id,
-        None,                # min_price
+        None,
         max_price,
         days_until_needed,
         merged_preferences,
@@ -409,43 +383,33 @@ async def recommend(
     )
     logger.info(f"[PERF] retrieve_gifts: {(time.time() - t_retrieval)*1000:.0f}ms")
 
-    # Strip already-shown gifts (load more) and trim to base_k
     if exclude_names_lower:
         before = len(gifts)
         gifts = [g for g in gifts if g.get("name", "").lower() not in exclude_names_lower]
         logger.info(f"Load more: stripped {before - len(gifts)} already-shown, {len(gifts)} remain")
         gifts = gifts[:base_k]
 
-    # ------------------------------------------------------------------
-    # CONFIDENCE THRESHOLD FILTER
-    # Skipped for load-more — positions 6-10 are intentionally lower-ranked.
-    # ------------------------------------------------------------------
     if not exclude_names_lower:
         original_count = len(gifts)
         gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
         if original_count != len(gifts):
             logger.info(f"Filtered out {original_count - len(gifts)} gifts below 65% confidence")
 
-    # ------------------------------------------------------------------
-    # SESSION CONTEXT FOR LLM
-    # Extended with relationship_stage and confidence
-    # ------------------------------------------------------------------
     session_context = {
         "occasion":           occasion,
-        "relationship":       relationship_stage,   # LLM prompt compat
-        "relationship_stage": relationship_stage,   # new explicit field
+        "relationship":       relationship_stage,
+        "relationship_stage": relationship_stage,
         "budget":             max_price,
         "days_until_needed":  days_until_needed,
         "confidence":         confidence,
     }
 
-    # Results page copy — new addition
     results_headline, results_subline = get_results_headline(
         occasion or "", relationship_stage
     )
 
     # ------------------------------------------------------------------
-    # NON-STREAMING PATH — same as original, response envelope extended
+    # NON-STREAMING PATH
     # ------------------------------------------------------------------
     if not stream:
         t_llm = time.time()
@@ -475,21 +439,17 @@ async def recommend(
 
         return {
             **llm_response,
-            "occasion":          occasion,
-            "relationship_stage":relationship_stage,
-            "partner_name":      partner_name,
-            "total_found":       len(gifts),
-            "confidence":        confidence,
-            "results_headline":  results_headline,
-            "results_subline":   results_subline,
+            "occasion":           occasion,
+            "relationship_stage": relationship_stage,
+            "partner_name":       partner_name,
+            "total_found":        len(gifts),
+            "confidence":         confidence,
+            "results_headline":   results_headline,
+            "results_subline":    results_subline,
         }
 
     # ------------------------------------------------------------------
     # STREAMING PATH — SSE (?stream=true)
-    # Event 1: top 3 gift previews immediately after retrieval (~500ms)
-    # Event 2: full LLM result with reasons for all gifts
-    # Sentinel: [DONE]
-    # Extended with results_headline/subline in the result event
     # ------------------------------------------------------------------
     async def event_stream():
         preview_gifts = [
@@ -552,14 +512,14 @@ async def recommend(
         media_type="text/event-stream",
         headers={
             "Cache-Control":               "no-cache",
-            "X-Accel-Buffering":           "no",   # disables Nginx buffering
+            "X-Accel-Buffering":           "no",
             "Access-Control-Allow-Origin": "*",
         },
     )
 
 
 # =============================================================================
-# ADMIN ENDPOINTS — all unchanged from original
+# ADMIN ENDPOINTS
 # =============================================================================
 
 @app.post("/admin/load-vectors", dependencies=[Depends(require_api_key)])
@@ -581,6 +541,10 @@ async def admin_dashboard():
 
 @app.post("/admin/generate-embeddings")
 async def generate_embeddings_for_all_gifts():
+    """
+    Original endpoint — only processes gifts where embedding IS NULL.
+    Use /admin/regenerate-embeddings to force-refresh existing embeddings.
+    """
     from app.retrieval import get_supabase_client
     from app.embeddings import (
         generate_embedding,
@@ -602,24 +566,18 @@ async def generate_embeddings_for_all_gifts():
         for gift in gifts:
             try:
                 text = create_gift_text_for_embedding(gift)
-                logger.info(
-                    "Generating embedding for: %s" % gift.get("name", "")[:40]
-                )
+                logger.info("Generating embedding for: %s" % gift.get("name", "")[:40])
                 embedding = generate_embedding(text)
                 if embedding:
                     if update_gift_embedding(gift["id"], embedding):
                         success_count += 1
-                        logger.info(
-                            "✓ Saved embedding for: %s" % gift.get("name", "")[:40]
-                        )
+                        logger.info("✓ Saved embedding for: %s" % gift.get("name", "")[:40])
                     else:
                         error_count += 1
                 else:
                     error_count += 1
             except Exception as e:
-                logger.error(
-                    "Error processing gift %s: %s" % (gift.get("id", ""), str(e))
-                )
+                logger.error("Error processing gift %s: %s" % (gift.get("id", ""), str(e)))
                 error_count += 1
 
         return {
@@ -630,6 +588,99 @@ async def generate_embeddings_for_all_gifts():
         }
     except Exception as e:
         logger.error("Error in generate_embeddings: %s" % str(e))
+        return {"status": "error", "error": str(e)}
+
+
+# =============================================================================
+# REGENERATE EMBEDDINGS — request model + endpoint
+# =============================================================================
+
+class RegenerateEmbeddingsRequest(BaseModel):
+    gift_ids: Optional[List[str]] = None
+
+
+@app.post("/admin/regenerate-embeddings", dependencies=[Depends(verify_admin)])
+async def regenerate_embeddings(body: RegenerateEmbeddingsRequest = None):
+    """
+    Force re-generate embeddings for specific gifts by ID, or the entire catalog.
+
+    Use this after tag migrations — the original /admin/generate-embeddings
+    skips gifts that already have an embedding, so it won't pick up tag changes.
+    This endpoint ignores existing embeddings entirely.
+
+    Body (optional JSON):
+        {}                              → re-generates ALL gifts (full catalog)
+        { "gift_ids": ["gift_0001"] }   → targeted refresh for specific IDs
+
+    110 gifts costs ~$0.00 at text-embedding-3-small rates (~30 seconds).
+    """
+    from app.retrieval import get_supabase_client
+    from app.embeddings import (
+        generate_embedding,
+        create_gift_text_for_embedding,
+        update_gift_embedding,
+    )
+
+    try:
+        supabase = get_supabase_client()
+
+        gift_ids = body.gift_ids if body else None
+
+        if gift_ids:
+            response = (
+                supabase.table("gifts")
+                .select("*")
+                .in_("id", gift_ids)
+                .execute()
+            )
+            mode = f"targeted ({len(gift_ids)} IDs)"
+        else:
+            # Full catalog refresh — ignores existing embeddings
+            response = supabase.table("gifts").select("*").execute()
+            mode = "full catalog"
+
+        gifts = response.data or []
+        logger.info(f"Re-embedding {len(gifts)} gifts — mode: {mode}")
+
+        success_count = 0
+        error_count   = 0
+        skipped_ids   = []
+
+        for gift in gifts:
+            try:
+                text = create_gift_text_for_embedding(gift)
+                embedding = generate_embedding(text)
+
+                if embedding:
+                    if update_gift_embedding(gift["id"], embedding):
+                        success_count += 1
+                        logger.info(
+                            f"✓ Re-embedded: "
+                            f"{gift.get('display_name') or gift.get('name', '')[:50]}"
+                        )
+                    else:
+                        error_count += 1
+                        skipped_ids.append(gift["id"])
+                else:
+                    error_count += 1
+                    skipped_ids.append(gift["id"])
+
+            except Exception as e:
+                logger.error(f"Error re-embedding {gift.get('id')}: {e}")
+                error_count += 1
+                skipped_ids.append(gift.get("id"))
+
+        return {
+            "status":          "complete",
+            "mode":            mode,
+            "total_processed": len(gifts),
+            "success":         success_count,
+            "errors":          error_count,
+            "skipped_ids":     skipped_ids,
+        }
+
+    except Exception as e:
+        logger.error(f"Error in regenerate_embeddings: {e}")
         return {"status": "error", "error": str(e)}
 
 
