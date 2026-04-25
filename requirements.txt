@@ -12,3 +12,4 @@ cryptography
 requests
 PyJWT[crypto]
 sentry-sdk[fastapi]
+resend
