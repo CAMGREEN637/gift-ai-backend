@@ -404,6 +404,7 @@ async def recommend(
         "budget":             max_price,
         "days_until_needed":  days_until_needed,
         "confidence":         confidence,
+        "niche_keywords":     list(body.niche_keywords or []),
     }
 
     results_headline, results_subline = get_results_headline(

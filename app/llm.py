@@ -294,8 +294,12 @@ def generate_gift_response(
     occasion   = session_context.get("occasion")          if session_context else None
     budget     = session_context.get("budget")            if session_context else None
     days       = session_context.get("days_until_needed") if session_context else None
-    confidence = session_context.get("confidence")        if session_context else None
-    vibe       = list(partner_vibe) if partner_vibe else []
+    confidence     = session_context.get("confidence")        if session_context else None
+    niche_keywords = (session_context.get("niche_keywords") or []) if session_context else []
+    vibe           = list(partner_vibe) if partner_vibe else []
+
+    # Combine taxonomy interests with raw niche keywords so the LLM sees the full picture.
+    all_interests = list(dict.fromkeys(list(partner_interests) + list(niche_keywords)))
 
     urgency = _get_urgency_label(days)
 
@@ -324,7 +328,9 @@ def generate_gift_response(
     # Interest match signal is only meaningful when the user provided interests.
     # When confidence is 'lost' or interests are empty, suppress the signal entirely
     # so the LLM doesn't produce "isn't a her known interests gift" copy.
-    has_interests = bool(partner_interests) and confidence != "lost"
+    has_interests = bool(all_interests) and confidence != "lost"
+    # Use only taxonomy-matched interests for the interest_match tag — niche keywords won't
+    # appear in gift interest fields, so including them would only cause false negatives.
     user_interests_set = set(i.lower().strip() for i in partner_interests) if has_interests else set()
 
     # --- Build sanitized gift context lines ---
@@ -354,8 +360,8 @@ def generate_gift_response(
     # Only injected when interests are present. Completely omitted otherwise
     # so the LLM has no temptation to reference missing interest data.
     if has_interests:
-        interests_str     = ", ".join(partner_interests[:5])
-        interests_preview = partner_interests[0]
+        interests_str     = ", ".join(all_interests[:5])
+        interests_preview = all_interests[0]
         interest_signal_block = (
             f"INTEREST MATCH SIGNAL: Each gift is tagged 'interest_match: YES or NO'.\n"
             f"- For YES gifts: connect the reason to her known interest naturally — this is what makes it specific.\n"
@@ -377,7 +383,7 @@ def generate_gift_response(
         )
 
     # --- Safe interests preview for inline use in the GOOD example ---
-    interests_preview = partner_interests[0] if partner_interests else None
+    interests_preview = all_interests[0] if all_interests else None
 
     system_prompt = (
         f"You are an elite gift advisor helping men feel confident about the gift they're about to buy.\n"
@@ -387,8 +393,13 @@ def generate_gift_response(
         f"TARGET: {target} | OCCASION: {occasion or 'general'} | "
         f"STAGE: {relationship or 'unknown'} | TIMING: {urgency} | "
         f"BUDGET: {'$' + str(budget) if budget else 'flexible'}\n"
-        f"KNOWN INTERESTS: {interests_str}\n\n"
-        f"{gift_intelligence}\n\n"
+        f"KNOWN INTERESTS: {interests_str}\n"
+        + (
+            f"SPECIFIC INTERESTS (use these verbatim in personalized copy — e.g. 'Her love of "
+            f"{niche_keywords[0]} makes this a perfect fit'): {', '.join(niche_keywords)}\n"
+            if niche_keywords and confidence != "lost" else ""
+        )
+        + f"\n{gift_intelligence}\n\n"
         f"NAME RULE — THIS IS MANDATORY:\n"
         f"The recipient's name is '{target}'. You MUST use this name at least once in every single reason. "
         f"Do not write a reason that only uses 'she' or 'her' without ever saying '{target}'. "

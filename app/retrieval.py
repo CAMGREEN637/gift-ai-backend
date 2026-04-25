@@ -34,6 +34,7 @@ GENERIC_TOKENS = {
 }
 
 VECTOR_MATCH_THRESHOLD = 0.0
+SEMANTIC_BYPASS_THRESHOLD = 0.78
 
 # --------------------------------------------------
 # SCORING WEIGHTS — ORIGINAL
@@ -323,6 +324,8 @@ def build_search_query(request: RecommendRequest) -> str:
         parts.append(" ".join(request.interests[:5]))
         if request.overlap_interests:
             parts.append(" ".join(request.overlap_interests))
+        if request.niche_keywords:
+            parts.append(" ".join(request.niche_keywords))
         parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
     else:
         parts.append(occasion_phrases.get(request.occasion or "", "gift for her"))
@@ -337,6 +340,8 @@ def build_search_query(request: RecommendRequest) -> str:
             parts.append(" ".join(request.interests[:5]))
         if request.overlap_interests:
             parts.append(" ".join(request.overlap_interests))
+        if request.niche_keywords:
+            parts.append(" ".join(request.niche_keywords))
     return " ".join(filter(None, parts))
 
 
@@ -774,8 +779,16 @@ def retrieve_gifts(
     for g, current_price in normalised:
         gift_interests_set = set(g.get("interests") or [])
         if confidence_level == "confident" and request_interests:
-            if not gift_interests_set & set(request_interests):
+            has_tag_match      = bool(gift_interests_set & set(request_interests))
+            has_semantic_match = float(g.get("similarity") or 0) >= SEMANTIC_BYPASS_THRESHOLD
+            if not (has_tag_match or has_semantic_match):
                 continue
+            if not has_tag_match and has_semantic_match:
+                logger.info(
+                    f"Semantic bypass: '{g.get('display_name')}' "
+                    f"(sim={float(g.get('similarity') or 0):.3f}, "
+                    f"tags={list(gift_interests_set)})"
+                )
         scored.append(_score_gift(g, current_price, is_fallback=False))
 
     logger.info(f"Pass 1 yielded {len(scored)} interest-matched gifts")

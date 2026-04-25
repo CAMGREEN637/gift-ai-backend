@@ -93,6 +93,10 @@ class RecommendRequest(BaseModel):
     # These receive a scoring boost in the retrieval layer.
     overlap_interests: Optional[List[str]] = Field(default_factory=list)
 
+    # Raw niche keywords extracted from freeform interest input (e.g. "Star Wars", "true crime").
+    # Bypass the taxonomy and feed directly into the embedding query and LLM prompt.
+    niche_keywords: Optional[List[str]] = Field(default_factory=list)
+
     # Date/shipping context — occasion_date must be an ISO date string (YYYY-MM-DD)
     occasion_date: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     days_until_needed: Optional[int] = None
