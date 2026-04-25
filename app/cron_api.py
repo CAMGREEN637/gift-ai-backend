@@ -1,70 +1,144 @@
+# app/cron_api.py
+
 from fastapi import APIRouter, Header, HTTPException, Depends
-from supabase import Client
 from app.database import get_db
 from app.email_service import send_reminder_email
+from supabase import Client
 from datetime import date
+from typing import Optional
 import os
+import logging
 
-cron_router = APIRouter(prefix="/cron", tags=["cron"])
-CRON_SECRET = os.getenv("CRON_SECRET", "40ce557ed67cb1895db0a1022f1668740624d498635f821847d82fc4d7fcc9a6")
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/cron", tags=["cron"])
+
+CRON_SECRET = os.getenv("CRON_SECRET", "change-this")
+REMINDER_DAYS = {14, 7, 3, 1}
 
 
-@cron_router.post("/send-reminders")
+def _require_cron_secret(x_cron_secret: Optional[str] = Header(None)):
+    if x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+
+def _days_until_next(date_str: str, today: date) -> Optional[int]:
+    try:
+        d = date.fromisoformat(str(date_str)[:10])
+        next_occ = date(today.year, d.month, d.day)
+        if next_occ < today:
+            next_occ = date(today.year + 1, d.month, d.day)
+        return (next_occ - today).days
+    except Exception:
+        return None
+
+
+@router.post("/send-reminders")
 async def send_reminders(
-    x_cron_secret: str = Header(None),
+    _: None = Depends(_require_cron_secret),
     db: Client = Depends(get_db),
 ):
-    # Simple secret header so random people can't trigger mass emails
-    if x_cron_secret != CRON_SECRET:
-        raise HTTPException(status_code=401)
-
     today = date.today()
-    reminders_sent = 0
+    sent_count = 0
 
-    # Pull all user profiles that have recipients with dates set
-    profiles = db.table("user_profiles").select("*").execute().data or []
+    try:
+        profiles_resp = db.table("user_profiles").select("*").execute()
+        profiles = profiles_resp.data or []
+    except Exception as e:
+        logger.error("Failed to fetch user profiles: %s" % str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch profiles")
 
     for profile in profiles:
         user_email = profile.get("email")
         if not user_email:
             continue
 
-        for recipient in profile.get("saved_recipients", []):
-            partner_id   = recipient.get("id")
-            partner_name = recipient.get("name", "")
-            past_gifts   = [
+        recipients = profile.get("saved_recipients") or []
+
+        for recipient in recipients:
+            if not recipient.get("reminder_enabled", True):
+                continue
+
+            recipient_id = recipient.get("id", "")
+            partner_name = recipient.get("name", "Unknown")
+            saved_gifts = recipient.get("saved_gifts") or []
+            past_gift_names = [
                 g.get("display_name") or g.get("name", "")
-                for g in recipient.get("saved_gifts", [])
+                for g in saved_gifts[:3]
+                if g.get("display_name") or g.get("name")
             ]
 
-            for occasion, field in [("birthday", "birthday"), ("anniversary", "anniversary")]:
-                raw_date = recipient.get(field)
-                if not raw_date:
-                    continue
+            checks = [
+                ("birthday", recipient.get("birthday"), None),
+                ("anniversary", recipient.get("anniversary"), None),
+                (
+                    "custom",
+                    recipient.get("custom_occasion_date"),
+                    recipient.get("custom_occasion_name"),
+                ),
+            ]
 
+            for occasion_key, date_str, custom_name in checks:
+                if not date_str:
+                    continue
+                days = _days_until_next(date_str, today)
+                if days is None or days not in REMINDER_DAYS:
+                    continue
                 try:
-                    occasion_date = date.fromisoformat(str(raw_date)[:10])
-                except ValueError:
-                    continue
-
-                # Next occurrence this year or next
-                next_occurrence = occasion_date.replace(year=today.year)
-                if next_occurrence < today:
-                    next_occurrence = next_occurrence.replace(year=today.year + 1)
-
-                days_until = (next_occurrence - today).days
-
-                # Send at 14 days and 7 days out
-                if days_until in (14, 7, 3, 1):
-                    sent = send_reminder_email(
+                    ok = send_reminder_email(
                         to=user_email,
                         partner_name=partner_name,
-                        occasion=occasion,
-                        days_until=days_until,
-                        partner_id=partner_id,
-                        past_gifts=past_gifts,
+                        occasion=occasion_key,
+                        days_until=days,
+                        partner_id=recipient_id,
+                        past_gifts=past_gift_names,
+                        custom_occasion_name=custom_name,
                     )
-                    if sent:
-                        reminders_sent += 1
+                    if ok:
+                        sent_count += 1
+                        logger.info(
+                            "Sent %s reminder for %s to %s (%d days out)"
+                            % (occasion_key, partner_name, user_email, days)
+                        )
+                    else:
+                        logger.error(
+                            "Reminder send failed for %s/%s to %s"
+                            % (partner_name, occasion_key, user_email)
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Error sending reminder for %s/%s: %s"
+                        % (partner_name, occasion_key, str(e))
+                    )
 
-    return {"sent": reminders_sent, "date": str(today)}
+    return {"sent": sent_count, "date": str(today)}
+
+
+@router.post("/test-email")
+async def test_email(
+    body: Optional[dict] = None,
+    _: None = Depends(_require_cron_secret),
+):
+    to = (body or {}).get("to") or os.getenv("TEST_EMAIL")
+    if not to:
+        raise HTTPException(
+            status_code=400,
+            detail="No recipient — provide 'to' in body or set TEST_EMAIL env var",
+        )
+
+    try:
+        ok = send_reminder_email(
+            to=to,
+            partner_name="Sarah",
+            occasion="birthday",
+            days_until=7,
+            partner_id="test-id",
+            past_gifts=["Faux Fur Blanket", "Bath Bombs Set"],
+        )
+        return {
+            "sent": ok,
+            "message": "Test email sent successfully" if ok else "Failed to send test email",
+        }
+    except Exception as e:
+        logger.error("test-email error: %s" % str(e))
+        return {"sent": False, "message": str(e)}

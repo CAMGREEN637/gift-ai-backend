@@ -25,6 +25,9 @@ class Recipient(BaseModel):
     relationship_stage: Optional[str] = None
     birthday: Optional[date] = None
     anniversary: Optional[date] = None
+    reminder_enabled: bool = True
+    custom_occasion_name: Optional[str] = None
+    custom_occasion_date: Optional[date] = None
     interests: List[str] = []
     vibe: List[str] = []
     preferred_price_range: Optional[str] = None
@@ -90,7 +93,7 @@ def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
 
 # --- Helpers ---
 def _serialize_recipient(recipient_dict: dict) -> dict:
-    for date_field in ("birthday", "anniversary", "lastGiftDate"):
+    for date_field in ("birthday", "anniversary", "lastGiftDate", "custom_occasion_date"):
         if recipient_dict.get(date_field):
             recipient_dict[date_field] = str(recipient_dict[date_field])
     return recipient_dict

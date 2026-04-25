@@ -46,6 +46,7 @@ from supabase import Client
 # Import routers
 from app.partners_api import router as partners_router
 from app.user_profile_api import router as user_profile_router
+from app.cron_api import router as cron_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -86,6 +87,7 @@ except Exception as e:
 app.include_router(admin_router)
 app.include_router(partners_router)
 app.include_router(user_profile_router)
+app.include_router(cron_router)
 
 
 # Startup
