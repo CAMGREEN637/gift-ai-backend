@@ -339,18 +339,40 @@ def generate_gift_response(
     # --- Build sanitized gift context lines ---
     # Each line is optionally tagged with interest_match: YES/NO — but ONLY
     # when the user actually provided interests. Otherwise the tag is omitted.
+    #
+    # Match logic accepts EITHER:
+    #   (a) the gift's interest tags overlap with the user's selected interests, OR
+    #   (b) the gift's name or description contains the user's niche keyword.
+    #
+    # Without (b), niche keywords like "puzzles" will always read as interest_match: NO
+    # even when the product is literally a puzzle — which sends the LLM into
+    # "this isn't a puzzles gift, but..." apology mode. Text-level matching catches
+    # these custom interests that don't exist in the taxonomy.
+    niche_kw_set = {kw.lower().strip() for kw in niche_keywords if kw}
+
     gift_lines = []
     for i, g in enumerate(gifts, 1):
-        name      = _sanitize_for_prompt(g.get("name", ""))
+        raw_name  = g.get("name", "") or ""
+        raw_desc  = g.get("description", "") or ""
+        name      = _sanitize_for_prompt(raw_name)
         desc      = _sanitize_for_prompt(
-                        textwrap.shorten(g.get("description", ""), width=100, placeholder="...")
+                        textwrap.shorten(raw_desc, width=100, placeholder="...")
                     )
         price     = g.get("price", 0)
         vibe_tags = ", ".join(g.get("vibe") or [])
 
         if has_interests:
             gift_interests = set(_normalize_jsonb_to_list(g.get("interests") or []))
-            interest_match = "YES" if (gift_interests & user_interests_set) else "NO"
+            tag_match = bool(gift_interests & user_interests_set)
+
+            # Niche keyword text match — checks the raw (un-sanitized) name and
+            # description for any niche keyword the user provided. Useful for
+            # custom interests like "puzzles", "skiing", "espresso" that aren't
+            # in the predefined taxonomy.
+            text_blob = (raw_name + " " + raw_desc).lower()
+            text_match = any(kw in text_blob for kw in niche_kw_set)
+
+            interest_match = "YES" if (tag_match or text_match) else "NO"
             gift_lines.append(
                 f"{i}. {name} (${price}) | vibe: {vibe_tags} | interest_match: {interest_match} | {desc}"
             )

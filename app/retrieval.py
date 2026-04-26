@@ -769,6 +769,16 @@ def retrieve_gifts(
             quiz_signal_score = raw_quiz_score * 30
 
         final_score    = original_score + quiz_signal_score
+
+        # Fallbacks are by definition non-interest-matches — they were promoted
+        # because Pass 1 came up short. Suppress the missed_intent flag for them
+        # so assign_ranked_confidence() will lift their confidence above the
+        # 0.65 threshold based on rank position. Otherwise they get filtered out
+        # in main.py and the user sees an empty results page.
+        effective_missed_intent = (
+            False if is_fallback else score_data.get("missed_intent", False)
+        )
+
         confidence_val = compute_confidence(vec_sim, score_data["intent_match_count"])
 
         reasons = []
@@ -791,7 +801,7 @@ def retrieve_gifts(
             "ranking_reasons":          reasons if reasons else ["Highly rated match"],
             "delivery_status":          delivery_status,
             "already_purchased":        score_data.get("already_purchased", False),
-            "missed_intent":            score_data.get("missed_intent", False),
+            "missed_intent":            effective_missed_intent,
             "fallback":                 is_fallback,
             "gift_type_classification": gift_type_classification,
         })
