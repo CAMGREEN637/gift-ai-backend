@@ -80,7 +80,7 @@ class RecommendRequest(BaseModel):
 
     # Smart preselection outputs (user may have overridden)
     vibe: Optional[List[VibeEnum]] = Field(default_factory=list)
-    max_price: Optional[float] = Field(None, ge=0, le=100000)
+    max_price: Optional[float] = Field(None, ge=0, le=999999)
 
     # Confidence routing
     confidence: Optional[ConfidenceEnum] = None
