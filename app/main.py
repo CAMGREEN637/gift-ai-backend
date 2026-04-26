@@ -393,9 +393,12 @@ async def recommend(
 
     if not exclude_names_lower:
         original_count = len(gifts)
-        gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65]
+        gifts = [g for g in gifts if g.get("confidence", 0) >= 0.65 or g.get("fallback", False)]
         if original_count != len(gifts):
-            logger.info(f"Filtered out {original_count - len(gifts)} gifts below 65% confidence")
+            logger.info(
+                f"Filtered out {original_count - len(gifts)} gifts "
+                f"below 65% confidence (fallbacks preserved)"
+            )
 
     session_context = {
         "occasion":           occasion,

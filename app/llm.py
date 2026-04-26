@@ -333,6 +333,9 @@ def generate_gift_response(
     # appear in gift interest fields, so including them would only cause false negatives.
     user_interests_set = set(i.lower().strip() for i in partner_interests) if has_interests else set()
 
+    fallback_count = sum(1 for g in gifts if g.get("fallback", False))
+    all_fallback = fallback_count == len(gifts) and len(gifts) > 0
+
     # --- Build sanitized gift context lines ---
     # Each line is optionally tagged with interest_match: YES/NO — but ONLY
     # when the user actually provided interests. Otherwise the tag is omitted.
@@ -359,7 +362,17 @@ def generate_gift_response(
     # --- Build interest signal instructions for the prompt ---
     # Only injected when interests are present. Completely omitted otherwise
     # so the LLM has no temptation to reference missing interest data.
-    if has_interests:
+    if has_interests and all_fallback:
+        interests_str     = ", ".join(all_interests[:5])
+        interests_preview = all_interests[0]
+        interest_signal_block = (
+            f"INTEREST NOTE: We could not find gifts specifically matching "
+            f"{interests_str}. All results are strong picks for the occasion and vibe. "
+            f"Frame each reason around why it works for {occasion or 'this occasion'} at this "
+            f"relationship stage. Do NOT apologize or say 'this isn't a {interests_preview} "
+            f"gift'. Lead with occasion and vibe logic confidently.\n"
+        )
+    elif has_interests:
         interests_str     = ", ".join(all_interests[:5])
         interests_preview = all_interests[0]
         interest_signal_block = (

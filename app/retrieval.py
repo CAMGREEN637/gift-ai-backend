@@ -34,7 +34,7 @@ GENERIC_TOKENS = {
 }
 
 VECTOR_MATCH_THRESHOLD = 0.0
-SEMANTIC_BYPASS_THRESHOLD = 0.78
+SEMANTIC_BYPASS_THRESHOLD = 0.72
 
 # --------------------------------------------------
 # SCORING WEIGHTS — ORIGINAL
@@ -257,11 +257,12 @@ def tokenize(text: str) -> Set[str]:
     return {t for t in tokens if len(t) > 3}
 
 
-def extract_meaningful_intent_tokens(query: str) -> Set[str]:
-    all_tokens       = tokenize(query)
-    words            = query.split()
-    capitalized_words = {word.lower() for word in words if word and word[0].isupper()}
-    meaningful       = all_tokens - GENERIC_TOKENS - capitalized_words
+def extract_meaningful_intent_tokens(query: str, partner_name: Optional[str] = None) -> Set[str]:
+    all_tokens = tokenize(query)
+    partner_name_tokens = set()
+    if partner_name:
+        partner_name_tokens = {t.lower() for t in partner_name.split() if len(t) > 2}
+    meaningful = all_tokens - GENERIC_TOKENS - partner_name_tokens
     logger.info(f"Query: '{query}' -> Meaningful tokens: {meaningful}")
     return meaningful
 
@@ -398,6 +399,7 @@ def compute_enhanced_score(
     confidence_level: str = "somewhat",
     weak_vector_match: bool = False,
     feedback_lookup: Optional[Dict[str, int]] = None,
+    niche_keywords: Optional[List[str]] = None,
 ) -> Dict:
     g_interests  = gift.get("interests") or []
     g_categories = gift.get("gift_type") or gift.get("categories") or []
@@ -446,9 +448,16 @@ def compute_enhanced_score(
             and len(broad_interest_matches) == 0):
         intent_penalty = -60
 
+    niche_bonus = 0
+    if niche_keywords:
+        for kw in niche_keywords:
+            if kw.lower() in gift_text:
+                niche_bonus += 55
+                break
+
     total_boost = (
         intent_score + session_score + exact_boost + profile_score
-        + history_penalty + feedback_score + intent_penalty
+        + history_penalty + feedback_score + intent_penalty + niche_bonus
     )
 
     return {
@@ -459,6 +468,7 @@ def compute_enhanced_score(
         "broad_interest_matches": broad_interest_matches,
         "missed_intent":          intent_penalty < 0,
         "interest_overlap":       interest_overlap,
+        "niche_bonus":            niche_bonus,
     }
 
 
@@ -603,7 +613,8 @@ def retrieve_gifts(
       Pass 2 — vibe/occasion fallbacks when Pass 1 yields fewer than k results
     """
     preferences          = normalize_preferences(preferences)
-    meaningful_intent_tokens = extract_meaningful_intent_tokens(query)
+    partner_name = getattr(request, "partner_name", None) if request else None
+    meaningful_intent_tokens = extract_meaningful_intent_tokens(query, partner_name)
     partner_gift_history = partner_gift_history or []
 
     confidence_level = "somewhat"
@@ -619,7 +630,12 @@ def retrieve_gifts(
 
     request_interests: Optional[List[str]] = None
     if request is not None and confidence_level == "confident":
-        request_interests = list(request.interests or [])
+        niche_kw_set = set(kw.lower() for kw in (request.niche_keywords or []))
+        all_interests = list(request.interests or [])
+        request_interests = [i for i in all_interests if i.lower() not in niche_kw_set]
+        # If ONLY niche keywords were provided (no taxonomy tags),
+        # request_interests is now empty, which correctly disables
+        # the Pass 1 hard filter and lets vector similarity + scoring decide.
 
     feedback_lookup: Dict[str, int] = {}
     if user_id:
@@ -700,13 +716,22 @@ def retrieve_gifts(
         weak_vector_match = vec_sim < MIN_VECTOR_SCORE_FOR_FULL_SCORING
         vector_score      = vec_sim * VECTOR_WEIGHT
 
+        niche_kws = list(request.niche_keywords or []) if request else []
+
         score_data = compute_enhanced_score(
             g, meaningful_intent_tokens, preferences,
             user_id, partner_profile, partner_gift_history,
             confidence_level=confidence_level,
             weak_vector_match=weak_vector_match,
             feedback_lookup=feedback_lookup,
+            niche_keywords=niche_kws,
         )
+
+        if score_data.get("niche_bonus", 0) > 0:
+            logger.info(
+                f"Niche bonus +{score_data['niche_bonus']} for '{g.get('display_name')}' "
+                f"(matched niche keyword in gift text)"
+            )
 
         novelty_score = NOVELTY_BOOST if str(g.get("id")) not in [str(gid) for gid in partner_gift_history] else 0
 
