@@ -475,7 +475,7 @@ def compute_enhanced_score(
 def compute_confidence(vector_similarity: float, intent_match_count: int) -> float:
     if intent_match_count >= 1:
         if vector_similarity >= 0.75: return 0.95
-        if vector_similarity >= 0.66: return 0.89
+        if vector_similarity >= 0.65: return 0.89
         return 0.85
     return min(vector_similarity, 0.82)
 
