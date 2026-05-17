@@ -1226,3 +1226,21 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     run_agent(dry_run=args.dry_run, target=args.target, mode=args.mode)
+
+def insert_gift(supabase, row: dict, dry_run: bool = False) -> bool:
+    if dry_run:
+        logger.info(f"[DRY RUN] Would insert: {row['name']} (${row['price']})")
+        return True
+    try:
+        if "/dp/" in (row.get("link") or ""):
+            asin = row["link"].split("/dp/")[1].split("?")[0]
+            existing = supabase.table("gifts").select("id").ilike("link", f"%/dp/{asin}%").execute()
+            if existing.data:
+                logger.info(f"ASIN dupe: {row['name']} | ASIN: {asin} | matched: {existing.data[0]}")
+                return False
+        supabase.table("gifts").insert(row).execute()
+        logger.info(f"✓ Inserted: {row['name']} (${row['price']})")
+        return True
+    except Exception as e:
+        logger.warning(f"Insert failed for '{row.get('name')}': {e}")
+        return False
