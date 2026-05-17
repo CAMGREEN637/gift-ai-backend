@@ -6,9 +6,17 @@ Upgrades over v1:
   1. Trend intelligence — Reddit API + Amazon Movers & Shakers
   2. Embedding-based deduplication (pgvector similarity > 0.93)
   3. Trend-to-query expansion via GPT-4o-mini
+  4. curl_cffi TLS fingerprint impersonation (bypasses Amazon bot detection)
+  5. Fortified request headers matching real browser behaviour
+  6. Exponential backoff on 503 bot-wall responses
+  7. Randomised jitter with occasional human-style reading pauses
+  8. Multi-selector A/B layout resilience for name + price extraction
 
 Usage:
     python gift_discovery_agent_v2.py [--dry-run] [--target 500] [--mode all|trends|static]
+
+Install:
+    pip install curl_cffi openai supabase python-dotenv beautifulsoup4 boto3
 
 Environment variables (required):
     SUPABASE_URL
@@ -43,11 +51,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-import requests
+import urllib.parse
+import requests  # used for Reddit API (JSON endpoints, no bot detection needed)
+from curl_cffi import requests as cffi_requests  # used for Amazon scraping — impersonates Chrome TLS fingerprint
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Global curl_cffi session — impersonates Chrome 120 TLS fingerprint.
+# Amazon inspects the TLS handshake, not just User-Agent. This is the
+# single biggest factor in bypassing their bot detection.
+amazon_session = cffi_requests.Session(impersonate="chrome120")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -395,25 +410,23 @@ class AmazonMoversScraper:
         ("https://www.amazon.com/gp/movers-and-shakers/handmade", "hobby"),
     ]
 
-    HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
     def fetch_signals(self, top_n: int = 15) -> list[TrendSignal]:
         """
-        Scrape top N movers per category.
+        Scrape top N movers per category using curl_cffi (Chrome TLS impersonation).
         Rank 1 gets highest score, rank N gets lowest (linear decay).
         """
         signals: list[TrendSignal] = []
 
         for url, category in self.MOVERS_URLS:
             try:
-                resp = requests.get(url, headers=self.HEADERS, timeout=15)
+                resp = amazon_session.get(url, headers=AMAZON_SCRAPE_HEADERS, timeout=15)
+
+                if resp.status_code == 503:
+                    backoff = random.uniform(12.0, 18.0)
+                    logger.warning(f"503 on Movers ({category}). Backing off {backoff:.0f}s.")
+                    time.sleep(backoff)
+                    continue
+
                 resp.raise_for_status()
                 soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -453,7 +466,11 @@ class AmazonMoversScraper:
                     found += 1
 
                 logger.info(f"Amazon Movers ({category}): found {found} products")
-                time.sleep(random.uniform(2.0, 3.5))  # polite rate limit
+                # Jitter with occasional reading pause
+                base_sleep = random.uniform(2.0, 5.0)
+                if random.random() < 0.1:
+                    base_sleep += random.uniform(5.0, 10.0)
+                time.sleep(base_sleep)
 
             except Exception as e:
                 logger.warning(f"Amazon Movers scrape failed for {category}: {e}")
@@ -643,19 +660,123 @@ def build_affiliate_url(asin: str) -> str:
     return f"https://www.amazon.com/dp/{asin}?tag={AFFILIATE_TAG}"
 
 
+# Fortified headers matching a real Chrome 120 browser navigation request.
+# curl_cffi handles the User-Agent automatically to match the impersonate flag,
+# so we omit it here — adding a mismatched UA would break the fingerprint.
+AMAZON_SCRAPE_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+
+def _extract_name(item) -> str:
+    """
+    Multi-selector name extraction — resilient to Amazon A/B layout tests.
+    Amazon frequently rotates HTML structure; trying multiple selectors in
+    priority order means a layout change breaks one path, not all of them.
+    """
+    selectors = [
+        "h2 a span",
+        "h2 span.a-text-normal",
+        "[data-cy='title-recipe'] span",
+        "a.a-link-normal span.a-text-normal",
+        "div.s-title-instructions-style span",
+        "span.a-size-medium.a-color-base.a-text-normal",
+    ]
+    for sel in selectors:
+        el = item.select_one(sel)
+        if el:
+            text = el.get_text(strip=True)
+            if text:
+                return text
+    return ""
+
+
+def _extract_price(item) -> Optional[float]:
+    """
+    Multi-selector price extraction — handles split whole/fraction format
+    and the hidden .a-offscreen span Amazon uses for accessibility
+    (more stable across layout variants than the visible price elements).
+    """
+    # Try the hidden accessibility span first — most layout-stable
+    offscreen = item.select_one(".a-price .a-offscreen")
+    if offscreen:
+        try:
+            raw = offscreen.get_text(strip=True).replace("$", "").replace(",", "")
+            price = float(raw)
+            if PRICE_MIN <= price <= PRICE_MAX:
+                return price
+        except ValueError:
+            pass
+
+    # Fall back to split whole + fraction
+    whole_el = item.select_one(".a-price-whole")
+    frac_el = item.select_one(".a-price-fraction")
+    if whole_el:
+        try:
+            whole_text = whole_el.get_text(strip=True).replace(",", "").replace(".", "")
+            price = float(whole_text)
+            if frac_el:
+                price += float(frac_el.get_text(strip=True)) / 100
+            # Sanity check: if price looks like cents (e.g. 4999), convert
+            if price > PRICE_MAX * 10:
+                price /= 100
+            if PRICE_MIN <= price <= PRICE_MAX:
+                return price
+        except ValueError:
+            pass
+
+    # Last resort: any data-a-color="price" span
+    price_el = item.select_one("[data-a-color='price'] span")
+    if price_el:
+        try:
+            raw = price_el.get_text(strip=True).replace("$", "").replace(",", "")
+            price = float(raw)
+            if PRICE_MIN <= price <= PRICE_MAX:
+                return price
+        except ValueError:
+            pass
+
+    return None
+
+
 def search_amazon_scraping(query: str) -> list[dict]:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    search_url = f"https://www.amazon.com/s?k={requests.utils.quote(query)}&rh=p_36%3A1500-30000"
+    """
+    Amazon product search using curl_cffi (Chrome TLS impersonation).
+
+    Improvements over v1:
+    - curl_cffi replaces requests → bypasses TLS fingerprint detection
+    - Fortified headers match a real Chrome navigation request
+    - 503 triggers graceful backoff instead of crash/silent fail
+    - Jitter includes occasional human-style reading pauses
+    - Multi-selector extraction handles A/B layout variants
+    """
+    search_url = (
+        f"https://www.amazon.com/s"
+        f"?k={urllib.parse.quote(query)}"
+        f"&rh=p_36%3A1500-30000"  # $15–$300 price filter in cents
+    )
 
     try:
-        resp = requests.get(search_url, headers=headers, timeout=15)
+        resp = amazon_session.get(search_url, headers=AMAZON_SCRAPE_HEADERS, timeout=15)
+
+        # 503 = bot wall / CAPTCHA. Back off gracefully — don't retry immediately.
+        if resp.status_code == 503:
+            backoff = random.uniform(12.0, 18.0)
+            logger.warning(f"503 bot protection hit for '{query}'. Backing off {backoff:.0f}s.")
+            time.sleep(backoff)
+            return []
+
         resp.raise_for_status()
+
     except Exception as e:
         logger.warning(f"Amazon search failed for '{query}': {e}")
         return []
@@ -668,24 +789,18 @@ def search_amazon_scraping(query: str) -> list[dict]:
             asin = item.get("data-asin", "")
             if not asin:
                 continue
-            name_el = item.select_one("h2 a span")
-            name = name_el.get_text(strip=True) if name_el else ""
+
+            name = _extract_name(item)
             if not name:
                 continue
-            price_whole = item.select_one(".a-price-whole")
-            price_frac = item.select_one(".a-price-fraction")
-            if not price_whole:
+
+            price = _extract_price(item)
+            if price is None:
                 continue
-            try:
-                price = float(price_whole.get_text(strip=True).replace(",", "").replace(".", ""))
-                if price_frac:
-                    price += float(price_frac.get_text(strip=True)) / 100
-            except ValueError:
-                continue
-            if not (PRICE_MIN <= price <= PRICE_MAX):
-                continue
+
             img_el = item.select_one("img.s-image")
             image_url = img_el.get("src", "") if img_el else ""
+
             products.append({
                 "asin": asin,
                 "name": name,
@@ -698,7 +813,13 @@ def search_amazon_scraping(query: str) -> list[dict]:
             continue
 
     logger.info(f"Scraped {len(products)} products for '{query}'")
-    time.sleep(random.uniform(2.0, 4.0))
+
+    # Randomised jitter with occasional human-style reading pause (Gemini suggestion #4)
+    base_sleep = random.uniform(2.0, 5.0)
+    if random.random() < 0.1:  # 10% chance of a longer "reading" pause
+        base_sleep += random.uniform(5.0, 10.0)
+    time.sleep(base_sleep)
+
     return products
 
 
