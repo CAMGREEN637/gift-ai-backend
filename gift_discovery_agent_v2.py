@@ -89,7 +89,13 @@ INTEREST_TAGS = [
 GIFT_TYPE_TAGS = ["tech", "home", "outdoors", "fitness", "hobby", "beauty", "kitchen", "book", "fashion"]
 VIBE_TAGS = ["cozy", "romantic", "sentimental", "luxe", "fun", "thoughtful", "pampering"]
 OCCASION_TAGS = ["birthday", "valentines", "anniversary", "christmas", "mothers_day", "just_because", "apology"]
-PRIORITY_INTERESTS = ["skincare", "coffee", "fitness", "home_decor", "wellness", "yoga", "reading", "fashion"]
+PRIORITY_INTERESTS = [
+    # Currently sparse — run these first
+    "baking", "wine", "running", "cycling", "music", "gaming",
+    "photography", "art", "hiking", "camping", "movies", "makeup",
+    # Already covered — will mostly dedup skip
+    "skincare", "coffee", "fitness", "home_decor", "wellness", "yoga", "reading", "fashion",
+]
 
 # Static fallback queries (same as v1) — used when trend layer yields nothing
 STATIC_QUERIES_BY_INTEREST: dict[str, list[str]] = {
