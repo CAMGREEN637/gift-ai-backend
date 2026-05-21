@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Gift AI — Discovery Agent v2
+Gift AI — Discovery Agent v3
 =============================
-Upgrades over v1:
-  1. Trend intelligence — Reddit API + Amazon Movers & Shakers
-  2. Embedding-based deduplication (pgvector similarity > 0.93)
-  3. Trend-to-query expansion via GPT-4o-mini
-  4. curl_cffi TLS fingerprint impersonation (bypasses Amazon bot detection)
-  5. Fortified request headers matching real browser behaviour
-  6. Exponential backoff on 503 bot-wall responses
-  7. Randomised jitter with occasional human-style reading pauses
-  8. Multi-selector A/B layout resilience for name + price extraction
+Upgrades over v2:
+  1. Price distribution fix — dual-tier queries per interest (standard + premium brand queries)
+     targets the $50–$300 range that was previously missing
+  2. Interest coverage fix — sparse interests (baking, wine, music, gaming, photography,
+     art, hiking, camping, movies, makeup, running, cycling) moved to top of priority queue
+  3. Vibe classification fix — overhauled prompt with explicit rules preventing "thoughtful"
+     from being used as a catch-all; "luxe" and "romantic" now correctly applied
+  4. Occasion sanitization — invalid tags (housewarming, wedding, etc.) stripped at insert
+     time with fallback to ["birthday", "just_because"] if all tags are wiped
 
 Usage:
-    python gift_discovery_agent_v2.py [--dry-run] [--target 500] [--mode all|trends|static]
+    python gift_discovery_agent_v3.py [--dry-run] [--target 500] [--mode all|trends|static]
 
 Install:
     pip install curl_cffi openai supabase python-dotenv beautifulsoup4 boto3
@@ -90,65 +90,245 @@ GIFT_TYPE_TAGS = ["tech", "home", "outdoors", "fitness", "hobby", "beauty", "kit
 VIBE_TAGS = ["cozy", "romantic", "sentimental", "luxe", "fun", "thoughtful", "pampering"]
 OCCASION_TAGS = ["birthday", "valentines", "anniversary", "christmas", "mothers_day", "just_because", "apology"]
 PRIORITY_INTERESTS = [
-    # Currently sparse — run these first
-    "baking", "wine", "running", "cycling", "pets", "gaming",
+    # Completely uncovered in last run — highest priority
+    "baking", "wine", "running", "cycling", "music", "gaming",
     "photography", "art", "hiking", "camping", "movies", "makeup",
-    # Already covered — will mostly dedup skip
-    "skincare", "coffee", "fitness", "home_decor", "wellness", "yoga", "reading", "fashion",
+    # Partially covered — still need premium price tier depth
+    "fashion", "reading", "pets", "cooking", "cocktails", "travel", "gardening",
+    # Already well covered — dedup will skip most, but premium queries may find gaps
+    "skincare", "coffee", "fitness", "home_decor", "wellness", "yoga",
 ]
 
-# Static fallback queries (same as v1) — used when trend layer yields nothing
+# Static queries — each interest has:
+#   - Standard queries (broad, tend to surface $15–$50 products)
+#   - Premium queries (brand-specific or price-signalled, surface $50–$300 products)
+# This dual-tier approach fixes the price skew: 69% of gifts were under $30.
 STATIC_QUERIES_BY_INTEREST: dict[str, list[str]] = {
-    "skincare": ["luxury skincare gift set for women", "face serum gift set women", "vitamin C skincare routine gift",
-                 "gua sha facial tool set gift", "retinol cream gift women"],
-    "coffee": ["coffee lover gift for women", "pour over coffee set gift", "coffee subscription gift box",
-               "espresso gift set women", "travel coffee mug insulated gift"],
-    "fitness": ["fitness gift for her", "yoga mat gift set women", "resistance bands gift set",
-                "foam roller recovery kit gift", "athletic wear gift women"],
-    "home_decor": ["home decor gift for women", "luxury candle gift set", "aesthetic desk organizer gift",
-                   "throw blanket gift soft", "ceramic vase gift minimalist"],
-    "wellness": ["wellness gift basket for women", "meditation kit gift set", "aromatherapy diffuser gift",
-                 "bath and body gift set luxury", "crystal healing set gift"],
-    "yoga": ["yoga gift set for women", "yoga block cork set gift", "yoga bag gift women",
-             "aromatherapy yoga mat spray gift", "meditation cushion gift set"],
-    "reading": ["book lover gift for women", "reading nook gift set cozy", "book subscription box gift",
-                "kindle accessories gift set", "literary themed candle gift"],
-    "fashion": ["fashion gift for women", "silk scarf gift women luxury", "jewelry gift set for her",
-                "sunglasses gift women", "leather wallet gift women"],
-    "cooking": ["cooking gift for women", "gourmet spice set gift", "cookbook gift women", "chef knife set gift",
-                "artisan salt gift set"],
-    "baking": ["baking gift set for women", "stand mixer attachment gift", "artisan bread baking kit gift",
-               "cookie decorating gift set", "baking cookbook gift women"],
-    "wine": ["wine lover gift for her", "wine tasting kit gift", "wine aerator decanter gift set",
-             "wine subscription gift", "wine glass set gift women"],
-    "cocktails": ["cocktail making gift set women", "bartender kit gift", "mocktail gift set women",
-                  "cocktail recipe book gift", "whiskey stone set gift women"],
-    "makeup": ["makeup gift set for women", "luxury eyeshadow palette gift", "lipstick gift set women",
-               "makeup brush set gift", "tinted moisturizer gift"],
-    "travel": ["travel gift for women", "travel toiletry bag gift", "passport holder gift women",
-               "travel pillow luxury gift", "packing cubes gift set women"],
-    "running": ["running gift for women", "running belt waist pack gift", "GPS watch gift women running",
-                "compression socks gift runner", "hydration vest gift women"],
-    "hiking": ["hiking gift for women", "trekking poles gift women", "hiking daypack gift women",
-               "headlamp gift hiking women", "trail snack gift set"],
-    "camping": ["camping gift for women", "hammock gift women outdoor", "camping lantern gift women",
-                "camp mug insulated gift", "outdoor blanket gift women"],
-    "cycling": ["cycling gift for women", "bike accessories gift women", "cycling jersey gift women",
-                "water bottle cycling gift", "bike lock gift women"],
-    "photography": ["photography gift for women", "camera strap gift women", "photo album gift personalized",
-                    "instant camera gift women", "camera bag gift women"],
-    "art": ["art supply gift for women", "watercolor set gift women", "sketchbook gift premium",
-            "pottery kit gift at home", "painting class gift set"],
-    "music": ["music lover gift for women", "wireless earbuds gift women", "vinyl record gift women",
-              "ukulele gift women beginner", "music subscription gift card"],
-    "gaming": ["gaming gift for women", "cozy gaming gift set women", "gaming headset gift women",
-               "Nintendo Switch gift accessories", "board game gift couples"],
-    "gardening": ["gardening gift for women", "herb garden kit indoor gift", "garden tool set women gift",
-                  "succulent kit gift women", "garden apron gift women"],
-    "movies": ["movie lover gift for women", "home theater gift set", "film photography gift women",
-               "movie night gift basket", "streaming subscription gift card"],
-    "pets": ["pet lover gift for women", "cat lover gift set women", "dog lover gift set women",
-             "pet photo gift personalized", "animal lover candle gift"],
+    "skincare": [
+        # Standard
+        "skincare gift set for women", "face serum gift set women",
+        "vitamin C skincare routine gift", "gua sha facial tool set gift",
+        # Premium ($50–$300 targets)
+        "Tatcha skincare gift set luxury", "La Mer moisturizer gift women",
+        "Drunk Elephant skincare gift set", "luxury anti-aging skincare gift $100",
+        "Sulwhasoo skincare gift set premium",
+    ],
+    "coffee": [
+        # Standard
+        "coffee lover gift for women", "pour over coffee set gift",
+        "coffee subscription gift box", "travel coffee mug insulated gift",
+        # Premium
+        "Fellow Ode grinder gift coffee", "Ember smart mug gift",
+        "luxury espresso machine gift $150", "Nespresso machine gift set",
+        "premium coffee subscription gift $75",
+    ],
+    "fitness": [
+        # Standard
+        "fitness gift for her", "resistance bands gift set",
+        "foam roller recovery kit gift", "athletic wear gift women",
+        # Premium
+        "Lululemon gift set women fitness", "Garmin fitness watch gift women",
+        "Theragun massage gun gift", "luxury gym bag gift women $80",
+        "Apple Watch gift women fitness",
+    ],
+    "home_decor": [
+        # Standard
+        "home decor gift for women", "luxury candle gift set",
+        "throw blanket gift soft", "ceramic vase gift minimalist",
+        # Premium
+        "Diptyque candle gift set luxury", "Matouk linen gift women",
+        "Anthropologie home gift set $75", "luxury diffuser gift set $100",
+        "Jonathan Adler gift women home decor",
+    ],
+    "wellness": [
+        # Standard
+        "wellness gift basket for women", "meditation kit gift set",
+        "aromatherapy diffuser gift", "crystal healing set gift",
+        # Premium
+        "Theragun wellness gift $150", "Hyperice recovery gift women",
+        "luxury sauna blanket gift", "weighted blanket premium gift $80",
+        "NuFace facial device gift women",
+    ],
+    "yoga": [
+        # Standard
+        "yoga gift set for women", "yoga block cork set gift",
+        "yoga bag gift women", "meditation cushion gift set",
+        # Premium
+        "Manduka yoga mat gift premium", "Lululemon yoga gift set",
+        "luxury meditation gift set $100", "Gaiam premium yoga kit gift",
+        "yoga wheel gift set premium",
+    ],
+    "reading": [
+        # Standard
+        "book lover gift for women", "reading nook gift set cozy",
+        "book subscription box gift", "literary themed candle gift",
+        # Premium
+        "Kindle Paperwhite gift set", "leather journal gift set premium",
+        "BookTok book club gift set $60", "first edition book gift women",
+        "luxury reading accessories gift set",
+    ],
+    "fashion": [
+        # Standard
+        "fashion gift for women", "silk scarf gift women",
+        "sunglasses gift women", "leather wallet gift women",
+        # Premium
+        "designer silk scarf gift $100", "luxury handbag gift women $150",
+        "Quay sunglasses gift set women", "Mejuri jewelry gift set",
+        "cashmere scarf gift women luxury",
+    ],
+    "cooking": [
+        # Standard
+        "cooking gift for women", "gourmet spice set gift",
+        "cookbook gift women", "artisan salt gift set",
+        # Premium
+        "Le Creuset gift women cooking", "Staub cocotte gift set",
+        "luxury knife set gift women $100", "truffle oil gift set gourmet",
+        "chef cooking class gift experience",
+    ],
+    "baking": [
+        # Standard
+        "baking gift set for women", "cookie decorating gift set",
+        "baking cookbook gift women", "artisan bread baking kit gift",
+        # Premium
+        "KitchenAid attachment gift set baking", "Nordic Ware baking gift set",
+        "luxury baking gift set $75", "sourdough starter kit gift premium",
+        "Valrhona chocolate baking gift set",
+    ],
+    "wine": [
+        # Standard
+        "wine lover gift for her", "wine tasting kit gift",
+        "wine glass set gift women", "wine subscription gift",
+        # Premium
+        "Riedel wine glass set gift", "wine aerator decanter gift $60",
+        "luxury wine tasting gift set $100", "Coravin wine gift system",
+        "premium wine subscription gift $80",
+    ],
+    "cocktails": [
+        # Standard
+        "cocktail making gift set women", "bartender kit gift",
+        "mocktail gift set women", "cocktail recipe book gift",
+        # Premium
+        "Cocktail Kingdom bar tools gift", "luxury cocktail kit gift $75",
+        "Japanese whisky gift set women", "premium bitters cocktail gift set",
+        "crystal cocktail glasses gift set",
+    ],
+    "makeup": [
+        # Standard
+        "makeup gift set for women", "lipstick gift set women",
+        "makeup brush set gift", "tinted moisturizer gift",
+        # Premium
+        "Charlotte Tilbury gift set makeup", "NARS makeup gift set luxury",
+        "Natasha Denona eyeshadow gift", "luxury makeup gift set $80",
+        "Pat McGrath makeup gift women",
+    ],
+    "travel": [
+        # Standard
+        "travel gift for women", "travel toiletry bag gift",
+        "passport holder gift women", "packing cubes gift set women",
+        # Premium
+        "Away luggage gift women $275", "Beis weekender bag gift",
+        "luxury travel set gift $100", "Paravel travel bag gift women",
+        "cashmere travel blanket gift women",
+    ],
+    "running": [
+        # Standard
+        "running gift for women", "running belt waist pack gift",
+        "compression socks gift runner", "hydration vest gift women",
+        # Premium
+        "Garmin GPS watch gift women running", "On Running shoes gift women",
+        "Aftershokz headphones gift runner", "running jacket gift women $80",
+        "Polar heart rate monitor gift women",
+    ],
+    "hiking": [
+        # Standard
+        "hiking gift for women", "hiking daypack gift women",
+        "headlamp gift hiking women", "trail snack gift set",
+        # Premium
+        "Osprey hiking pack gift women", "Patagonia jacket gift women hiking",
+        "Yeti tumbler gift hikers", "trekking poles gift premium women",
+        "Arc'teryx gift women outdoor $150",
+    ],
+    "camping": [
+        # Standard
+        "camping gift for women", "hammock gift women outdoor",
+        "camping lantern gift women", "outdoor blanket gift women",
+        # Premium
+        "REI camping gift set women", "Yeti cooler gift women camping",
+        "luxury glamping gift set $100", "camp chair gift premium women",
+        "Big Agnes sleeping bag gift women",
+    ],
+    "cycling": [
+        # Standard
+        "cycling gift for women", "bike accessories gift women",
+        "water bottle cycling gift", "cycling jersey gift women",
+        # Premium
+        "Garmin cycling computer gift", "Rapha cycling gift women",
+        "cycling helmet gift premium women", "bike light gift set premium",
+        "Maap cycling kit gift women",
+    ],
+    "photography": [
+        # Standard
+        "photography gift for women", "camera strap gift women",
+        "photo album gift personalized", "instant camera gift women",
+        # Premium
+        "Fujifilm Instax gift set premium", "camera bag gift women $80",
+        "Polaroid Now camera gift set", "photo printing gift subscription",
+        "leather camera strap gift premium",
+    ],
+    "art": [
+        # Standard
+        "art supply gift for women", "watercolor set gift women",
+        "sketchbook gift premium", "pottery kit gift at home",
+        # Premium
+        "Winsor Newton watercolor gift set", "Procreate Apple Pencil gift",
+        "pottery wheel gift women $100", "luxury art supply gift set $75",
+        "painting class gift experience women",
+    ],
+    "music": [
+        # Standard
+        "music lover gift for women", "vinyl record gift women",
+        "ukulele gift women beginner", "music subscription gift card",
+        # Premium
+        "Sony WH1000XM5 headphones gift", "Bose QuietComfort gift women",
+        "turntable record player gift $150", "AirPods Pro gift women",
+        "premium wireless earbuds gift women $100",
+    ],
+    "gaming": [
+        # Standard
+        "gaming gift for women", "cozy gaming gift set women",
+        "Nintendo Switch gift accessories", "board game gift couples",
+        # Premium
+        "Nintendo Switch OLED gift women", "gaming chair gift women $150",
+        "Steam gift card premium gaming", "gaming headset gift women $80",
+        "Meta Quest VR headset gift",
+    ],
+    "gardening": [
+        # Standard
+        "gardening gift for women", "herb garden kit indoor gift",
+        "succulent kit gift women", "garden apron gift women",
+        # Premium
+        "Terrain garden gift set premium", "Bonsai starter kit gift $60",
+        "luxury seed collection gift women", "garden tool set premium gift $75",
+        "aeroponics garden kit gift $100",
+    ],
+    "movies": [
+        # Standard
+        "movie lover gift for women", "movie night gift basket",
+        "film photography gift women", "streaming subscription gift card",
+        # Premium
+        "Criterion Collection gift set films", "projector gift women home $150",
+        "luxury home theater gift set", "4K projector gift women $200",
+        "cinema light box gift premium",
+    ],
+    "pets": [
+        # Standard
+        "pet lover gift for women", "cat lover gift set women",
+        "dog lover gift set women", "animal lover candle gift",
+        # Premium
+        "Furbo dog camera gift $150", "luxury pet portrait gift custom",
+        "Whistle GPS tracker pet gift", "BarkBox premium gift subscription",
+        "personalized pet jewelry gift women $75",
+    ],
 }
 
 # ─── REDDIT SUBREDDITS FOR GIFT TREND SIGNALS ──────────────────────────────
@@ -926,16 +1106,51 @@ CLASSIFY_SYSTEM = """You are a product taxonomy classifier for a gift recommenda
 
 Return ONLY valid JSON — no markdown, no preamble, no explanation.
 
-Classify into:
-  interests (1-4): coffee, cooking, baking, wine, cocktails, fitness, running, cycling, yoga, reading, music, gaming, photography, art, travel, hiking, camping, gardening, movies, fashion, skincare, makeup, wellness, home_decor, pets
-  gift_type (1-3): tech, home, outdoors, fitness, hobby, beauty, kitchen, book, fashion
-  vibe (1-3): cozy, romantic, sentimental, luxe, fun, thoughtful, pampering
-  occasions (2-5): birthday, valentines, anniversary, christmas, mothers_day, just_because, apology
-  gender_skew: "female" | "male" | "unisex"
-  is_gift_appropriate: true | false  (false = consumable that ships poorly, strictly utilitarian, outside $15-$300)
-  description_for_embedding: 2-3 sentences. What it IS + the experience it creates + who it's for. Warm editorial tone. No invented specs.
+--- TAXONOMY ---
 
-JSON shape:
+interests (pick 1-4, ONLY from this exact list):
+coffee, cooking, baking, wine, cocktails, fitness, running, cycling, yoga, reading, music, gaming, photography, art, travel, hiking, camping, gardening, movies, fashion, skincare, makeup, wellness, home_decor, pets
+
+gift_type (pick 1-3, ONLY from this exact list):
+tech, home, outdoors, fitness, hobby, beauty, kitchen, book, fashion
+
+vibe (pick 1-3, ONLY from this exact list):
+cozy, romantic, sentimental, luxe, fun, thoughtful, pampering
+
+VIBE ASSIGNMENT RULES — read carefully, do not default to "thoughtful":
+- "luxe": price over $60 OR brand is known luxury (Tatcha, La Mer, Diptyque, Lululemon, Riedel, Le Creuset, Sony, Bose, Away, Patagonia, Arc'teryx). This is the most under-used tag — lean into it for premium items.
+- "romantic": jewelry, lingerie, perfume, candles for two, couples experiences, roses, heart motifs, date-night items. Use for valentines/anniversary gifts.
+- "sentimental": personalized items, photo gifts, custom engravings, keepsakes, "first" items (first home, first anniversary), memory books.
+- "pampering": spa, bath, skincare, massage, self-care rituals, face masks, body scrubs, anything indulgent.
+- "cozy": blankets, slippers, warm drinks, lounge wear, candles, reading nooks, anything soft/warm/stay-at-home.
+- "fun": games, novelty items, experiences, humorous gifts, activities.
+- "thoughtful": ONLY use when none of the above fit. Do NOT use as a catch-all. If unsure between thoughtful and another vibe, pick the other vibe.
+
+occasions (pick 2-5, ONLY from this exact list — do NOT invent others):
+birthday, valentines, anniversary, christmas, mothers_day, just_because, apology
+
+OCCASION RULES:
+- ONLY use occasions from the list above. Never use: housewarming, wedding, bridal_shower, thanksgiving, get_well, graduation, back_to_school, or any other occasion.
+- "valentines" and "anniversary": use for romantic, luxe, or sentimental items
+- "apology": use sparingly — only for truly versatile, peace-offering items
+- "just_because": default fallback for any gift that works any time
+- Every gift must have at least 2 occasions
+
+gender_skew: "female" | "male" | "unisex"
+- Default to "female" for beauty, skincare, yoga, wellness, home decor
+- "unisex" for tech, books, food/drink items
+- "male" only if clearly male-targeted
+
+is_gift_appropriate: true | false
+- false = digital download only, perishable food, strictly utilitarian (toilet paper, cleaning supplies), or price outside $15-$300
+
+description_for_embedding: 2-3 sentences.
+- What it IS and what experience/feeling it creates
+- Who it's for ("the woman who loves her morning ritual", "for the partner who has everything")
+- Include relevant vibes and interest signals naturally
+- Warm editorial tone. No invented specs or features.
+
+--- JSON SHAPE (return exactly this, nothing else) ---
 {"interests":[],"gift_type":[],"vibe":[],"occasions":[],"gender_skew":"female","is_gift_appropriate":true,"description_for_embedding":""}"""
 
 
@@ -1100,7 +1315,30 @@ def process_product(
         existing_names.add(name_lower)  # add to fast cache too
         return False
 
-    # 6. Build row and insert
+    # 6. Sanitize taxonomy fields — strip any values outside the known tag sets.
+    # The LLM occasionally invents tags (e.g. "housewarming", "beauty" as an interest).
+    # We strip them here rather than relying solely on the prompt.
+    VALID_INTERESTS  = set(INTEREST_TAGS)
+    VALID_GIFT_TYPES = set(GIFT_TYPE_TAGS)
+    VALID_VIBES      = set(VIBE_TAGS)
+    VALID_OCCASIONS  = set(OCCASION_TAGS)
+    VALID_GENDERS    = {"female", "male", "unisex"}
+
+    raw_occasions = classification.get("occasions", [])
+    clean_occasions = [o for o in raw_occasions if o in VALID_OCCASIONS]
+    # If sanitization wiped all occasions, fall back to sensible defaults
+    if not clean_occasions:
+        clean_occasions = ["birthday", "just_because"]
+        logger.debug(f"Occasion fallback applied for: {name[:60]}")
+
+    clean_interests = [i for i in classification.get("interests", []) if i in VALID_INTERESTS]
+    clean_gift_type = [t for t in classification.get("gift_type", []) if t in VALID_GIFT_TYPES]
+    clean_vibe      = [v for v in classification.get("vibe", []) if v in VALID_VIBES]
+    clean_gender    = classification.get("gender_skew", "unisex")
+    if clean_gender not in VALID_GENDERS:
+        clean_gender = "unisex"
+
+    # 7. Build row and insert
     gift_row = {
         "name": name,
         "display_name": name,
@@ -1110,11 +1348,11 @@ def process_product(
         "link": product.get("link", ""),
         "image_url": product.get("image_url", ""),
         "brand": product.get("brand"),
-        "interests": classification.get("interests", []),
-        "gift_type": classification.get("gift_type", []),
-        "vibe": classification.get("vibe", []),
-        "occasions": classification.get("occasions", []),
-        "gender_skew": classification.get("gender_skew", "unisex"),
+        "interests": clean_interests,
+        "gift_type": clean_gift_type,
+        "vibe": clean_vibe,
+        "occasions": clean_occasions,
+        "gender_skew": clean_gender,
         "is_prime_eligible": False,
         "shipping_min_days": 2,
         "shipping_max_days": 5,
