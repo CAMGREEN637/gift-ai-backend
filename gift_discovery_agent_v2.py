@@ -91,7 +91,7 @@ VIBE_TAGS = ["cozy", "romantic", "sentimental", "luxe", "fun", "thoughtful", "pa
 OCCASION_TAGS = ["birthday", "valentines", "anniversary", "christmas", "mothers_day", "just_because", "apology"]
 PRIORITY_INTERESTS = [
     # Currently sparse — run these first
-    "baking", "wine", "running", "cycling", "music", "gaming",
+    "baking", "wine", "running", "cycling", "pets", "gaming",
     "photography", "art", "hiking", "camping", "movies", "makeup",
     # Already covered — will mostly dedup skip
     "skincare", "coffee", "fitness", "home_decor", "wellness", "yoga", "reading", "fashion",
