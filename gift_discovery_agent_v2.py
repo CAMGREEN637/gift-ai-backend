@@ -403,8 +403,8 @@ class RedditTrendScraper:
 
 class AmazonMoversScraper:
     """
-    Scrapes Amazon Movers & Shakers — publicly available, no auth needed.
-    Best-seller momentum = strong gift potential signal.
+    Scrapes Amazon Movers & Shakers.
+    Updated with session warming, retry logic, and resilient grid selectors.
     """
 
     MOVERS_URLS = [
@@ -416,70 +416,93 @@ class AmazonMoversScraper:
         ("https://www.amazon.com/gp/movers-and-shakers/handmade", "hobby"),
     ]
 
+    def __init__(self):
+        self._session_warmed = False
+
+    def _warm_session(self):
+        """Hit the homepage first to establish standard routing cookies."""
+        if self._session_warmed:
+            return
+        try:
+            logger.info("Warming Amazon session cookies...")
+            amazon_session.get("https://www.amazon.com/", headers=AMAZON_SCRAPE_HEADERS, timeout=10)
+            time.sleep(random.uniform(2.0, 4.0))
+            self._session_warmed = True
+        except Exception as e:
+            logger.warning(f"Session warming failed: {e}")
+
     def fetch_signals(self, top_n: int = 15) -> list[TrendSignal]:
-        """
-        Scrape top N movers per category using curl_cffi (Chrome TLS impersonation).
-        Rank 1 gets highest score, rank N gets lowest (linear decay).
-        """
+        self._warm_session()
         signals: list[TrendSignal] = []
 
         for url, category in self.MOVERS_URLS:
-            try:
-                resp = amazon_session.get(url, headers=AMAZON_SCRAPE_HEADERS, timeout=15)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Update Referer to look like natural navigation
+                    headers = AMAZON_SCRAPE_HEADERS.copy()
+                    headers["Referer"] = "https://www.amazon.com/"
 
-                if resp.status_code == 503:
-                    backoff = random.uniform(12.0, 18.0)
-                    logger.warning(f"503 on Movers ({category}). Backing off {backoff:.0f}s.")
-                    time.sleep(backoff)
-                    continue
+                    resp = amazon_session.get(url, headers=headers, timeout=15)
 
-                resp.raise_for_status()
-                soup = BeautifulSoup(resp.text, "html.parser")
+                    if resp.status_code == 503:
+                        backoff = random.uniform(15.0, 25.0) * (attempt + 1)
+                        logger.warning(
+                            f"503 on Movers ({category}) [Attempt {attempt + 1}/{max_retries}]. Backing off {backoff:.0f}s.")
+                        time.sleep(backoff)
+                        continue  # Goes to the next iteration of the retry loop
 
-                # Amazon Movers & Shakers product names sit in zg-bdg-img-nn or similar
-                # Multiple selector attempts for resilience against layout changes
-                items = (
-                        soup.select(".zg-item-immersion")
-                        or soup.select('[data-p13n-asin-metadata]')
-                        or soup.select(".a-link-normal.a-text-normal")
-                )
+                    resp.raise_for_status()
+                    soup = BeautifulSoup(resp.text, "html.parser")
 
-                found = 0
-                for rank, item in enumerate(items[:top_n], start=1):
-                    name_el = (
-                            item.select_one(".p13n-sc-truncate")
-                            or item.select_one(".zg-item a span")
-                            or item.select_one("span.a-text-normal")
-                            or item.select_one("div._cDEzb_p13n-sc-css-line-clamp-1_1Fn1y")
-                    )
-                    if not name_el:
-                        continue
+                    # Use structural targeting rather than ephemeral CSS classes
+                    items = soup.select('div[id^="gridItemRoot"]')
 
-                    name = name_el.get_text(strip=True)
-                    if len(name) < 5:
-                        continue
+                    # Fallback if gridItemRoot isn't present
+                    if not items:
+                        items = soup.select(".zg-item-immersion, [data-p13n-asin-metadata]")
 
-                    # Score inversely proportional to rank (rank 1 = top_n pts)
-                    rank_score = float(top_n - rank + 1)
+                    found = 0
+                    for rank, item in enumerate(items[:top_n], start=1):
+                        # Extract name: Grid items usually have the title in an image alt tag or an explicit a-link-normal text span
+                        name = ""
 
-                    signals.append(TrendSignal(
-                        term=name,
-                        source="amazon_movers",
-                        score=rank_score * 10,  # scale up vs reddit scores
-                        raw_context=f"Amazon Movers & Shakers #{rank} in {category}",
-                        amazon_category=category,
-                    ))
-                    found += 1
+                        # Strategy A: Check image alt text (very stable)
+                        img_el = item.select_one('img')
+                        if img_el and img_el.get('alt'):
+                            name = img_el.get('alt').strip()
 
-                logger.info(f"Amazon Movers ({category}): found {found} products")
-                # Jitter with occasional reading pause
-                base_sleep = random.uniform(2.0, 5.0)
-                if random.random() < 0.1:
-                    base_sleep += random.uniform(5.0, 10.0)
-                time.sleep(base_sleep)
+                        # Strategy B: Check text content
+                        if not name or len(name) < 5:
+                            name_el = (
+                                    item.select_one("a.a-link-normal div:not(:has(img))")
+                                    or item.select_one("span.a-text-normal")
+                                    or item.select_one(".p13n-sc-truncate")
+                            )
+                            if name_el:
+                                name = name_el.get_text(strip=True)
 
-            except Exception as e:
-                logger.warning(f"Amazon Movers scrape failed for {category}: {e}")
+                        if len(name) < 5:
+                            continue
+
+                        rank_score = float(top_n - rank + 1)
+
+                        signals.append(TrendSignal(
+                            term=name,
+                            source="amazon_movers",
+                            score=rank_score * 10,
+                            raw_context=f"Amazon Movers & Shakers #{rank} in {category}",
+                            amazon_category=category,
+                        ))
+                        found += 1
+
+                    logger.info(f"Amazon Movers ({category}): found {found} products")
+                    time.sleep(random.uniform(3.0, 6.0))
+                    break  # Success, break out of the retry loop
+
+                except Exception as e:
+                    logger.warning(f"Amazon Movers scrape failed for {category} on attempt {attempt + 1}: {e}")
+                    time.sleep(random.uniform(5.0, 10.0))
 
         logger.info(f"Amazon Movers: collected {len(signals)} raw trend signals")
         return signals
